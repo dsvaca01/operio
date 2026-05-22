@@ -1,0 +1,38 @@
+services:
+  backend:
+    build: ./backend
+    container_name: operio-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - APP_NAME=Operio
+      - DATABASE_URL=postgresql://operio:operio@postgres:5432/operio
+      - QDRANT_URL=http://qdrant:6333
+    depends_on:
+      - postgres
+      - qdrant
+
+  postgres:
+    image: postgres:16
+    container_name: operio-postgres
+    environment:
+      - POSTGRES_USER=operio
+      - POSTGRES_PASSWORD=operio
+      - POSTGRES_DB=operio
+    ports:
+      - "5432:5432"
+    volumes:
+      - operio_postgres_data:/var/lib/postgresql/data
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: operio-qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - operio_qdrant_data:/qdrant/storage
+
+volumes:
+  operio_postgres_data:
+  operio_qdrant_data:
