@@ -1,3 +1,27 @@
+backend/Credentials/
+backend/credentials/
+
+# Env
+.env
+.env.*
+
+# Node
+node_modules/
+.next/
+
+# Python
+__pycache__/
+*.pyc
+venv/
+
+# Uploads
+uploads/
+
+# Logs
+*.log
+
+# DB
+*.sql
 .env
 __pycache__/
 *.pyc
@@ -6,3 +30,4 @@ node_modules/
 dist/
 build/
 .DS_Store
+
