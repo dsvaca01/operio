@@ -15,6 +15,7 @@ from app.services.search_service import search_documents
 from app.services.chat_service import answer_question, stream_answer_question
 from pydantic import BaseModel
 from fastapi import Depends
+from typing import Optional
 from app.services.imap_service import (
     get_unread_imap_emails,
     mark_imap_email_as_read,
@@ -56,6 +57,8 @@ from app.services.imap_service import (
     get_unread_imap_emails,
     mark_imap_email_as_read,
 )
+
+from app.services.gmail_service import draft_email_reply_with_context
 
 app = FastAPI(title="Operio API")
 init_db()
@@ -118,6 +121,11 @@ class UpdateRoleRequest(BaseModel):
 
 class MarkEmailReadRequest(BaseModel):
     email_id: str
+
+class DraftReplyWithDocumentsRequest(BaseModel):
+    subject: str
+    email_body: str
+    document_id: str
 
 
 def get_db_connection():
@@ -544,3 +552,30 @@ def mark_email_read(
         status_code=400,
         detail=f"Mark as read not supported for provider: {provider}",
     )
+
+@app.post("/emails/draft-reply-with-documents")
+def draft_reply_with_documents(
+    request: DraftReplyWithDocumentsRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    if not request.document_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Document must be selected",
+        )
+
+    relevant_chunks = search_documents(
+        query=request.email_body,
+        document_id=request.document_id,
+    )
+
+    draft = draft_email_reply_with_context(
+        email_subject=request.subject,
+        email_body=request.email_body,
+        context_chunks=relevant_chunks,
+    )
+
+    return {
+        "draft": draft,
+        "context_chunks": relevant_chunks,
+    }

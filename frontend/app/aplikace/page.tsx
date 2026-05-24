@@ -17,7 +17,16 @@ type EmailSummary = {
   summary: string;
   replyInstruction?: string;
   draftReply?: string;
+  body?: string;
+  ai_insights?: {
+    priority: "LOW" | "MEDIUM" | "HIGH";
+    labels: string[];
+    suggested_action: string;
+    risk_level: "low" | "medium" | "high";
+  };
 };
+
+type EmailItem = EmailSummary;
 
 type Source = {
   score: number;
@@ -45,6 +54,7 @@ export default function Home() {
   const [sources, setSources] = useState<Source[]>([]);
 
   const [emails, setEmails] = useState<EmailSummary[]>([]);
+  const [usedContext, setUsedContext] = useState<any[]>([]);
   const [emailLoading, setEmailLoading] = useState(false);
 
   const [loading, setLoading] = useState(false);
@@ -253,6 +263,58 @@ const copyToClipboard = async (text: string) => {
   }
 };
 
+const generateDraftReplyWithDocuments = async (email: EmailSummary) => {
+  if (!selectedDocumentId) {
+    alert("Nejprve vyber dokument, podle kterého mám odpověď připravit.");
+    return;
+  }
+
+  try {
+    setEmailLoading(true);
+
+    const token = localStorage.getItem("access_token");
+
+    const response = await fetch(`${API_URL}/emails/draft-reply-with-documents`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        subject: email.subject,
+        email_body: email.body || email.snippet || "",
+        document_id: selectedDocumentId,
+      }),
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      console.error(data);
+      alert("Generování odpovědi podle dokumentů selhalo.");
+      return;
+    }
+
+    setUsedContext(data.context_chunks || []);
+
+    setEmails((prev) =>
+      prev.map((item) =>
+        item.id === email.id
+          ? {
+              ...item,
+              draftReply: data.draft || "",
+            }
+          : item
+      )
+    );
+  } catch (error) {
+    console.error("Draft reply with documents failed", error);
+    alert("Nepodařilo se navrhnout odpověď podle dokumentů.");
+  } finally {
+    setEmailLoading(false);
+  }
+};
+
 const uploadFile = async () => {
   if (!file) return;
 
@@ -449,7 +511,8 @@ const uploadFile = async () => {
 
           
 
-          {activeAssistant === "knowledge" && (
+          {(activeAssistant === "knowledge" ||
+            activeAssistant === "email") && (
             <div className="mt-10 rounded-2xl border border-slate-800 bg-slate-950 p-4">
               <p className="text-xs uppercase tracking-wide text-slate-500">
                 Kontext dokumentů
@@ -607,6 +670,12 @@ const uploadFile = async () => {
 
                   <div className="rounded-3xl border border-slate-800 bg-slate-900 p-6">
                     <h3 className="text-xl font-semibold">Chat</h3>
+
+                    {selectedDocumentId && (
+                      <p className="mt-2 text-sm text-emerald-400">
+                        Aktivní dokument: {selectedDocumentId}
+                      </p>
+                    )}
 
                     <textarea
                       value={query}
@@ -831,6 +900,32 @@ const uploadFile = async () => {
                         <div className="mt-4 rounded-2xl bg-slate-900 p-4 text-sm leading-7 text-slate-300">
                           {email.summary}
                         </div>
+
+                        {email.ai_insights && (
+  <div className="mt-4 flex flex-wrap gap-2">
+    {email.ai_insights.priority === "HIGH" && (
+      <span className="rounded-full border border-red-500/40 bg-red-500/10 px-3 py-1 text-xs font-semibold text-red-300">
+        HIGH PRIORITY
+      </span>
+    )}
+
+    {email.ai_insights.labels?.map((label) => (
+      <span
+        key={label}
+        className="rounded-full border border-amber-500/40 bg-amber-500/10 px-3 py-1 text-xs font-medium text-amber-300"
+      >
+        {label}
+      </span>
+    ))}
+
+    {email.ai_insights.suggested_action && (
+      <span className="rounded-full border border-emerald-500/40 bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-300">
+        Suggested action: {email.ai_insights.suggested_action}
+      </span>
+    )}
+  </div>
+)}
+
                         <textarea
   value={email.replyInstruction || ""}
   onChange={(e) =>
@@ -848,6 +943,16 @@ const uploadFile = async () => {
     className="rounded-2xl bg-white px-5 py-3 text-sm font-semibold text-slate-950 hover:bg-slate-200 disabled:opacity-50"
   >
     Navrhnout odpověď
+  </button>
+
+  <button
+    onClick={() => generateDraftReplyWithDocuments(email)}
+    disabled={emailLoading || !selectedDocumentId}
+    className="rounded-2xl bg-indigo-500 px-5 py-3 text-sm font-semibold text-white hover:bg-indigo-400 disabled:opacity-50"
+  >
+    {selectedDocumentId
+      ? "Odpovědět podle dokumentu"
+      : "Vyber dokument pro odpověď"}
   </button>
 
   <button

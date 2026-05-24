@@ -1,6 +1,7 @@
 import base64
 from pathlib import Path
 from typing import Any
+import json
 
 from bs4 import BeautifulSoup
 from google.auth.transport.requests import Request
@@ -178,6 +179,115 @@ def get_unread_email_summaries(
 
     return output
 
+import json
+
+
+def analyze_email_insights(
+    subject: str,
+    sender: str,
+    body: str,
+):
+    safe_subject = subject or ""
+    safe_sender = sender or ""
+    safe_body = body or ""
+
+    prompt = f"""
+Jsi AI asistent pro prioritizaci emailů.
+
+Analyzuj email a vrať POUZE validní JSON.
+Nevracej markdown.
+Nevracej vysvětlení.
+
+Všechny hodnoty vrať v českém jazyce.
+
+Odesílatel:
+{safe_sender}
+
+Předmět:
+{safe_subject}
+
+Obsah emailu:
+{safe_body[:2000]}
+
+Vrať přesně tuto JSON strukturu:
+{{
+  "priority": "LOW",
+  "labels": [],
+  "suggested_action": "",
+  "risk_level": "low"
+}}
+
+Povolené hodnoty priority:
+LOW, MEDIUM, HIGH
+
+Povolené hodnoty risk_level:
+low, medium, high
+
+Pravidla:
+- Maximálně 3 labels
+- Labels musí být krátké
+- Labels musí být v češtině
+- suggested_action musí být v češtině
+- suggested_action maximálně 4 slova
+
+Pokud email vyžaduje odpověď použij:
+"Čeká na vaši odpověď"
+
+Pokud je klient nespokojený nebo hrozí eskalace použij:
+"Riziko eskalace klienta"
+
+Pokud email obsahuje termín použij:
+"Blížící se termín"
+
+Pokud není potřeba žádná akce:
+suggested_action nastav na:
+"Bez akce"
+
+Příklady suggested_action:
+- Odpovědět dnes
+- Zkontrolovat smlouvu
+- Poslat fakturu
+- Zavolat klientovi
+"""
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4.1-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Jsi AI asistent pro prioritizaci a třídění firemních emailů."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": prompt,
+                },
+            ],
+            temperature=0,
+        )
+
+        content = response.choices[0].message.content or ""
+
+        result = json.loads(content)
+
+        return {
+            "priority": result.get("priority", "LOW"),
+            "labels": result.get("labels", []),
+            "suggested_action": result.get("suggested_action", ""),
+            "risk_level": result.get("risk_level", "low"),
+        }
+
+    except Exception as error:
+        print("analyze_email_insights failed:", error)
+
+        return {
+            "priority": "LOW",
+            "labels": [],
+            "suggested_action": "",
+            "risk_level": "low",
+        }
 
 def draft_email_reply(
     subject: str,
@@ -273,3 +383,58 @@ Email summaries:
     )
 
     return response.choices[0].message.content or ""
+
+def draft_email_reply_with_context(
+    email_subject: str,
+    email_body: str,
+    context_chunks: list,
+):
+    context = "\n\n".join([
+        chunk["text"] for chunk in context_chunks
+    ])
+
+    prompt = f"""
+Jsi AI asistent pro pracovní emailovou komunikaci.
+
+Tvým úkolem je vytvořit profesionální odpověď na email na základě poskytnutého kontextu z dokumentů.
+
+PRAVIDLA:
+- Používej pouze informace z poskytnutého kontextu dokumentů.
+- Pokud informace v dokumentech chybí, napiš, že je potřeba informaci ověřit.
+- Nevymýšlej si fakta.
+- Odpovídej profesionálně, stručně a jasně.
+- Odpověď generuj vždy v češtině.
+- Zachovej formální business komunikaci.
+- Pokud email obsahuje dotazy, odpověz na všechny dostupné body.
+- Nevkládej žádné informace mimo dodaný kontext.
+
+PŘEDMĚT EMAILU:
+{email_subject}
+
+OBSAH EMAILU:
+{email_body}
+
+KONTEXT Z DOKUMENTŮ:
+{context}
+"""
+
+    response = client.chat.completions.create(
+        model="gpt-4.1-mini",
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "Jsi AI asistent pro firemní emailovou komunikaci. "
+                    "Generuješ přesné a profesionální odpovědi v češtině "
+                    "na základě dokumentového kontextu."
+                ),
+            },
+            {
+                "role": "user",
+                "content": prompt,
+            },
+        ],
+        temperature=0.2,
+    )
+
+    return response.choices[0].message.content

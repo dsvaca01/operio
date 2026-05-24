@@ -4,7 +4,7 @@ from email.header import decode_header
 from email.message import Message
 from datetime import datetime
 
-from app.services.gmail_service import summarize_email
+from app.services.gmail_service import summarize_email, analyze_email_insights
 
 
 def _decode_header_value(value: str | None) -> str:
@@ -70,8 +70,7 @@ def get_unread_imap_emails(
             datetime.strptime(date_from, "%Y-%m-%d")
             .strftime("%d-%b-%Y")
         )
-
-    search_criteria.extend(["SINCE", formatted_date])
+        search_criteria.extend(["SINCE", formatted_date])
 
     status, data = mailbox.search(None, *search_criteria)
 
@@ -98,6 +97,7 @@ def get_unread_imap_emails(
         body = _extract_body(message)
 
         summary = summarize_email(subject, sender, body)
+        insights = analyze_email_insights(subject, sender, body)
 
         output.append({
             "id": email_id.decode(),
@@ -105,6 +105,7 @@ def get_unread_imap_emails(
             "subject": subject or "(bez předmětu)",
             "snippet": body[:300],
             "summary": summary,
+            "ai_insights": insights,
         })
 
     mailbox.logout()
