@@ -1,7 +1,7 @@
 import base64
+import json
 from pathlib import Path
 from typing import Any
-import json
 
 from bs4 import BeautifulSoup
 from google.auth.transport.requests import Request
@@ -9,6 +9,8 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from openai import OpenAI
+
+from app.services.db_service import save_ai_usage
 
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
@@ -74,7 +76,47 @@ def _decode_body(payload: dict[str, Any]) -> str:
     return ""
 
 
-def summarize_email(subject: str, sender: str, body: str) -> str:
+def _track_openai_usage(
+    response,
+    user_id: int | None,
+    organization_id: int | None,
+    feature: str,
+    model: str,
+):
+    """
+    Uloží token usage po OpenAI callu.
+
+    Poznámka:
+    - Pokud user_id nebo organization_id není předané, tracking se přeskočí.
+    - To chrání starší volání funkcí, ale pro reálné měření musí endpointy
+      posílat current_user["user_id"] a current_user["organization_id"].
+    """
+    if user_id is None or organization_id is None:
+        return
+
+    usage = getattr(response, "usage", None)
+
+    if usage is None:
+        return
+
+    save_ai_usage(
+        user_id=user_id,
+        organization_id=organization_id,
+        feature=feature,
+        model=model,
+        prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+        completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
+        total_tokens=getattr(usage, "total_tokens", 0) or 0,
+    )
+
+
+def summarize_email(
+    subject: str,
+    sender: str,
+    body: str,
+    user_id: int | None = None,
+    organization_id: int | None = None,
+) -> str:
     prompt = f"""
 Shrň tento email česky.
 
@@ -91,8 +133,10 @@ Email:
 {body[:6000]}
 """
 
+    model = "gpt-4o-mini"
+
     response = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model=model,
         messages=[
             {
                 "role": "system",
@@ -106,6 +150,14 @@ Email:
         temperature=0.2,
     )
 
+    _track_openai_usage(
+        response=response,
+        user_id=user_id,
+        organization_id=organization_id,
+        feature="email_summary",
+        model=model,
+    )
+
     return response.choices[0].message.content or ""
 
 
@@ -113,6 +165,8 @@ def get_unread_email_summaries(
     limit: int = 5,
     date_from: str | None = None,
     date_to: str | None = None,
+    user_id: int | None = None,
+    organization_id: int | None = None,
 ):
     service = get_gmail_client()
 
@@ -165,7 +219,13 @@ def get_unread_email_summaries(
         )
 
         body = _decode_body(message.get("payload", {}))
-        summary = summarize_email(subject, sender, body)
+        summary = summarize_email(
+            subject=subject,
+            sender=sender,
+            body=body,
+            user_id=user_id,
+            organization_id=organization_id,
+        )
 
         output.append(
             {
@@ -179,13 +239,13 @@ def get_unread_email_summaries(
 
     return output
 
-import json
-
 
 def analyze_email_insights(
     subject: str,
     sender: str,
     body: str,
+    user_id: int | None = None,
+    organization_id: int | None = None,
 ):
     safe_subject = subject or ""
     safe_sender = sender or ""
@@ -251,8 +311,10 @@ Příklady suggested_action:
 """
 
     try:
+        model = "gpt-4.1-mini"
+
         response = client.chat.completions.create(
-            model="gpt-4.1-mini",
+            model=model,
             messages=[
                 {
                     "role": "system",
@@ -268,8 +330,15 @@ Příklady suggested_action:
             temperature=0,
         )
 
-        content = response.choices[0].message.content or ""
+        _track_openai_usage(
+            response=response,
+            user_id=user_id,
+            organization_id=organization_id,
+            feature="email_insights",
+            model=model,
+        )
 
+        content = response.choices[0].message.content or ""
         result = json.loads(content)
 
         return {
@@ -289,12 +358,15 @@ Příklady suggested_action:
             "risk_level": "low",
         }
 
+
 def draft_email_reply(
     subject: str,
     sender: str,
     snippet: str,
     summary: str,
     instruction: str,
+    user_id: int | None = None,
+    organization_id: int | None = None,
 ) -> str:
     prompt = f"""
 Navrhni odpověď na email v češtině.
@@ -318,8 +390,10 @@ AI summary:
 {summary}
 """
 
+    model = "gpt-4o-mini"
+
     response = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model=model,
         messages=[
             {
                 "role": "system",
@@ -333,9 +407,22 @@ AI summary:
         temperature=0.3,
     )
 
+    _track_openai_usage(
+        response=response,
+        user_id=user_id,
+        organization_id=organization_id,
+        feature="email_draft_reply",
+        model=model,
+    )
+
     return response.choices[0].message.content or ""
 
-def create_email_overview(emails: list[dict]) -> str:
+
+def create_email_overview(
+    emails: list[dict],
+    user_id: int | None = None,
+    organization_id: int | None = None,
+) -> str:
     email_text = "\n\n".join(
         [
             f"From: {email.get('from')}\nSubject: {email.get('subject')}\nSummary: {email.get('summary')}"
@@ -367,8 +454,10 @@ Email summaries:
 {email_text}
 """
 
+    model = "gpt-4o-mini"
+
     response = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model=model,
         messages=[
             {
                 "role": "system",
@@ -382,16 +471,25 @@ Email summaries:
         temperature=0.2,
     )
 
+    _track_openai_usage(
+        response=response,
+        user_id=user_id,
+        organization_id=organization_id,
+        feature="email_overview",
+        model=model,
+    )
+
     return response.choices[0].message.content or ""
+
 
 def draft_email_reply_with_context(
     email_subject: str,
     email_body: str,
     context_chunks: list,
+    user_id: int | None = None,
+    organization_id: int | None = None,
 ):
-    context = "\n\n".join([
-        chunk["text"] for chunk in context_chunks
-    ])
+    context = "\n\n".join([chunk["text"] for chunk in context_chunks])
 
     prompt = f"""
 Jsi AI asistent pro pracovní emailovou komunikaci.
@@ -418,8 +516,10 @@ KONTEXT Z DOKUMENTŮ:
 {context}
 """
 
+    model = "gpt-4.1-mini"
+
     response = client.chat.completions.create(
-        model="gpt-4.1-mini",
+        model=model,
         messages=[
             {
                 "role": "system",
@@ -437,4 +537,12 @@ KONTEXT Z DOKUMENTŮ:
         temperature=0.2,
     )
 
-    return response.choices[0].message.content
+    _track_openai_usage(
+        response=response,
+        user_id=user_id,
+        organization_id=organization_id,
+        feature="email_draft_reply_with_documents",
+        model=model,
+    )
+
+    return response.choices[0].message.content or ""

@@ -3,62 +3,61 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pathlib import Path
 from pydantic import BaseModel
+
 import os
 import shutil
 import uuid
 import psycopg2
-import imaplib
-
-from app.services.pdf_service import extract_text_from_pdf
-from app.services.chunk_service import chunk_text
-from app.services.search_service import search_documents
-from app.services.chat_service import answer_question, stream_answer_question
-from pydantic import BaseModel
-from fastapi import Depends
-from typing import Optional
-from app.services.imap_service import (
-    get_unread_imap_emails,
-    mark_imap_email_as_read,
-)
 
 from app.services.auth_service import (
-    register_user,
-    login_user,
     get_current_user,
+    login_user,
+    register_user,
 )
-
-from app.services.gmail_service import (
-    get_unread_email_summaries,
-    draft_email_reply,
-    create_email_overview,
-)
-
+from app.services.chat_service import answer_question, stream_answer_question
+from app.services.chunk_service import chunk_text
 from app.services.db_service import (
-    init_db,
-    save_document,
-    get_documents,
+    create_followup_item,
     delete_document,
-    get_organization_members,
-    update_member_role,
+    email_item_exists,
+    followup_exists,
     get_all_users,
+    get_documents,
     get_email_connection,
+    get_email_items,
+    get_followup_items,
+    get_organization_members,
+    ignore_followup_item,
+    init_db,
+    mark_email_item_as_read,
+    mark_email_item_as_unread,
+    mark_followup_done,
+    mark_missing_email_items_as_read,
+    save_document,
     save_email_connection,
+    save_email_item,
+    share_followup_with_org,
+    update_followup_due_date,
+    update_member_role,
 )
-
-from app.services.qdrant_service import (
-    upsert_chunks,
-    delete_document_chunks,
+from app.services.gmail_service import (
+    analyze_email_insights,
+    create_email_overview,
+    draft_email_reply,
+    draft_email_reply_with_context,
+    summarize_email,
 )
-
-from app.services.db_service import save_email_connection
-from app.services.db_service import get_email_connection
-
 from app.services.imap_service import (
     get_unread_imap_emails,
     mark_imap_email_as_read,
 )
+from app.services.pdf_service import extract_text_from_pdf
+from app.services.qdrant_service import (
+    delete_document_chunks,
+    upsert_chunks,
+)
+from app.services.search_service import search_documents
 
-from app.services.gmail_service import draft_email_reply_with_context
 
 app = FastAPI(title="Operio API")
 init_db()
@@ -77,12 +76,17 @@ UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
 
 
+# =========================
+# Request models
+# =========================
+
 class ImapConnectionRequest(BaseModel):
     email_address: str
     imap_host: str
     imap_port: int
     username: str
     password: str
+
 
 class ChatRequest(BaseModel):
     query: str
@@ -99,6 +103,10 @@ class EmailDraftRequest(BaseModel):
 
 class EmailOverviewRequest(BaseModel):
     emails: list[dict]
+
+
+class EmailSyncRequest(BaseModel):
+    date_from: str | None = None
 
 
 class RegisterRequest(BaseModel):
@@ -119,14 +127,28 @@ class UpdateRoleRequest(BaseModel):
     user_id: int
     role: str
 
+
 class MarkEmailReadRequest(BaseModel):
     email_id: str
+
 
 class DraftReplyWithDocumentsRequest(BaseModel):
     subject: str
     email_body: str
     document_id: str
 
+
+class FollowupGenerateRequest(BaseModel):
+    days_back: int = 7
+
+
+class FollowupDueDateRequest(BaseModel):
+    due_date: str | None = None
+
+
+# =========================
+# Internal helpers
+# =========================
 
 def get_db_connection():
     database_url = os.getenv("DATABASE_URL")
@@ -140,43 +162,105 @@ def get_db_connection():
     return psycopg2.connect(database_url)
 
 
-def superadmin_update_organization_role(user_id: int, role: str):
+def sync_unread_emails_to_db(
+    current_user: dict,
+    date_from: str | None = None,
+    limit: int = 50,
+    use_ai_for_imap: bool = False,
+):
     """
-    Superadmin mění organization role uživatele v tabulce organization_members.
+    Source of truth je IMAP.
 
-    Poznámka:
-    Teď UI neposílá organization_id, takže se role změní ve všech organizacích,
-    kde je daný user_id členem. Pro MVP je to použitelné.
-    Později je lepší posílat i organization_id a měnit roli jen v konkrétní organizaci.
+    Flow:
+    1. Načte aktuální UNSEEN e-maily z IMAP INBOXu.
+    2. Nové e-maily uloží do DB cache.
+    3. Existující e-maily, které jsou znovu UNSEEN v IMAPu, obnoví v DB na is_read = FALSE.
+    4. E-maily, které už v IMAPu nejsou UNSEEN, označí v DB jako is_read = TRUE.
+
+    date_from:
+    - None = všechny UNSEEN e-maily
+    - YYYY-MM-DD = IMAP SINCE filtr včetně zadaného dne
     """
-    conn = get_db_connection()
+    connection = get_email_connection(current_user["user_id"])
 
-    try:
-        with conn:
-            with conn.cursor() as cursor:
-                cursor.execute(
-                    """
-                    UPDATE organization_members
-                    SET role = %s
-                    WHERE user_id = %s
-                    RETURNING id
-                    """,
-                    (role, user_id),
-                )
+    if not connection:
+        raise HTTPException(
+            status_code=404,
+            detail="Email connection is not configured",
+        )
 
-                updated_rows = cursor.fetchall()
+    emails = get_unread_imap_emails(
+        connection=connection,
+        limit=limit,
+        date_from=date_from,
+        use_ai=use_ai_for_imap,
+    )
 
-                if not updated_rows:
-                    raise HTTPException(
-                        status_code=404,
-                        detail="User is not member of any organization",
-                    )
+    unread_email_ids = [email_item["id"] for email_item in emails]
+    synced = []
 
-                return len(updated_rows)
+    for email_item in emails:
+        email_id = email_item["id"]
 
-    finally:
-        conn.close()
+        if email_item_exists(
+            organization_id=current_user["organization_id"],
+            user_id=current_user["user_id"],
+            email_id=email_id,
+        ):
+            mark_email_item_as_unread(
+                organization_id=current_user["organization_id"],
+                user_id=current_user["user_id"],
+                email_id=email_id,
+            )
 
+            synced.append({
+                **email_item,
+                "sync_status": "restored_unread",
+            })
+            continue
+
+        summary = summarize_email(
+            email_item.get("subject", ""),
+            email_item.get("from", ""),
+            email_item.get("snippet", ""),
+        )
+
+        insights = analyze_email_insights(
+            email_item.get("subject", ""),
+            email_item.get("from", ""),
+            email_item.get("snippet", ""),
+        )
+
+        save_email_item(
+            organization_id=current_user["organization_id"],
+            user_id=current_user["user_id"],
+            email_id=email_id,
+            sender=email_item.get("from", ""),
+            subject=email_item.get("subject", ""),
+            snippet=email_item.get("snippet", ""),
+            summary=summary,
+            ai_insights=insights,
+        )
+
+        synced.append({
+            **email_item,
+            "summary": summary,
+            "ai_insights": insights,
+            "sync_status": "created",
+        })
+
+    mark_missing_email_items_as_read(
+        organization_id=current_user["organization_id"],
+        user_id=current_user["user_id"],
+        unread_email_ids=unread_email_ids,
+    )
+
+    return synced
+
+
+# =========================
+# Health
+# =========================
 
 @app.get("/health")
 def health_check():
@@ -187,6 +271,10 @@ def health_check():
         "qdrant_url": os.getenv("QDRANT_URL"),
     }
 
+
+# =========================
+# Documents / Knowledge Assistant
+# =========================
 
 @app.post("/documents/upload")
 def upload_document(
@@ -218,17 +306,12 @@ def upload_document(
         shutil.copyfileobj(file.file, buffer)
 
     file_size = file_path.stat().st_size
-
     extracted_text = None
 
     if extension == ".pdf":
         extracted_text = extract_text_from_pdf(str(file_path))
 
-    chunks = []
-
-    if extracted_text:
-        chunks = chunk_text(extracted_text)
-
+    chunks = chunk_text(extracted_text) if extracted_text else []
     stored_chunks = 0
 
     if chunks:
@@ -264,36 +347,6 @@ def upload_document(
         "first_chunk_preview": chunks[0][:500] if chunks else None,
     }
 
-@app.get("/search")
-def search(query: str):
-    results = search_documents(query)
-
-    return {
-        "query": query,
-        "results": results,
-    }
-
-
-@app.post("/chat")
-def chat(request: ChatRequest):
-    result = answer_question(
-        query=request.query,
-        document_id=request.document_id,
-    )
-
-    return result
-
-
-@app.post("/chat/stream")
-def chat_stream(request: ChatRequest):
-    return StreamingResponse(
-        stream_answer_question(
-            query=request.query,
-            document_id=request.document_id,
-        ),
-        media_type="text/plain",
-    )
-
 
 @app.get("/documents")
 def documents(current_user: dict = Depends(get_current_user)):
@@ -303,6 +356,7 @@ def documents(current_user: dict = Depends(get_current_user)):
             current_user["user_id"],
         ),
     }
+
 
 @app.delete("/documents/{document_id}")
 def delete_document_endpoint(
@@ -318,7 +372,6 @@ def delete_document_endpoint(
     delete_document_chunks(document_id)
 
     file_path = UPLOAD_DIR / document_id
-
     if file_path.exists():
         file_path.unlink()
 
@@ -327,11 +380,81 @@ def delete_document_endpoint(
         "document_id": document_id,
     }
 
+
+@app.get("/search")
+def search(query: str):
+    return {
+        "query": query,
+        "results": search_documents(query),
+    }
+
+
+@app.post("/chat")
+def chat(request: ChatRequest):
+    return answer_question(
+        query=request.query,
+        document_id=request.document_id,
+    )
+
+
+@app.post("/chat/stream")
+def chat_stream(request: ChatRequest):
+    return StreamingResponse(
+        stream_answer_question(
+            query=request.query,
+            document_id=request.document_id,
+        ),
+        media_type="text/plain",
+    )
+
+
+# =========================
+# Email Assistant
+# =========================
+
 @app.get("/emails/unread")
 def unread_emails(
-    limit: int = 5,
     date_from: str | None = None,
-    date_to: str | None = None,
+    current_user: dict = Depends(get_current_user),
+):
+    sync_unread_emails_to_db(
+        current_user=current_user,
+        date_from=date_from,
+        limit=50,
+        use_ai_for_imap=False,
+    )
+
+    return {
+        "emails": get_email_items(
+            organization_id=current_user["organization_id"],
+            user_id=current_user["user_id"],
+        )
+    }
+
+
+@app.post("/emails/sync")
+def sync_emails(
+    request: EmailSyncRequest | None = None,
+    current_user: dict = Depends(get_current_user),
+):
+    date_from = request.date_from if request else None
+
+    synced = sync_unread_emails_to_db(
+        current_user=current_user,
+        date_from=date_from,
+        limit=50,
+        use_ai_for_imap=False,
+    )
+
+    return {
+        "synced_count": len(synced),
+        "emails": synced,
+    }
+
+
+@app.post("/emails/mark-read")
+def mark_email_read(
+    request: MarkEmailReadRequest,
     current_user: dict = Depends(get_current_user),
 ):
     connection = get_email_connection(current_user["user_id"])
@@ -344,51 +467,106 @@ def unread_emails(
 
     provider = connection.get("provider")
 
-    if provider == "imap":
-        return {
-            "emails": get_unread_imap_emails(
-                connection=connection,
-                limit=limit,
-                date_from=date_from,
-            )
-        }
+    if provider != "imap":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Mark as read not supported for provider: {provider}",
+        )
 
-    if provider == "gmail":
-        return {
-            "emails": get_unread_email_summaries(
-                limit=limit,
-                date_from=date_from,
-                date_to=date_to,
-            )
-        }
-
-    raise HTTPException(
-        status_code=400,
-        detail=f"Unsupported email provider: {provider}",
+    mark_imap_email_as_read(
+        connection=connection,
+        email_id=request.email_id,
     )
+
+    mark_email_item_as_read(
+        organization_id=current_user["organization_id"],
+        user_id=current_user["user_id"],
+        email_id=request.email_id,
+    )
+
+    return {"status": "marked_as_read"}
 
 
 @app.post("/emails/draft-reply")
-def email_draft_reply(request: EmailDraftRequest):
+def email_draft_reply(
+    request: EmailDraftRequest,
+    current_user: dict = Depends(get_current_user),
+):
     draft = draft_email_reply(
         subject=request.subject,
         sender=request.sender,
         snippet=request.snippet,
         summary=request.summary,
         instruction=request.instruction,
+        user_id=current_user["user_id"],
+        organization_id=current_user["organization_id"],
     )
 
-    return {
-        "draft": draft,
-    }
+    return {"draft": draft}
 
 
 @app.post("/emails/overview")
-def email_overview(request: EmailOverviewRequest):
+def email_overview(
+    request: EmailOverviewRequest,
+    current_user: dict = Depends(get_current_user),
+):
     return {
         "overview": create_email_overview(request.emails),
     }
 
+
+@app.post("/emails/draft-reply-with-documents")
+def draft_reply_with_documents(
+    request: DraftReplyWithDocumentsRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    if not request.document_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Document must be selected",
+        )
+
+    relevant_chunks = search_documents(
+        query=request.email_body,
+        document_id=request.document_id,
+    )
+
+    draft = draft_email_reply_with_context(
+        email_subject=request.subject,
+        email_body=request.email_body,
+        context_chunks=relevant_chunks,
+        user_id=current_user["user_id"],
+        organization_id=current_user["organization_id"],
+    )
+
+    return {
+        "draft": draft,
+        "context_chunks": relevant_chunks,
+    }
+
+
+@app.post("/email-connections/imap")
+def create_imap_connection(
+    request: ImapConnectionRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    save_email_connection(
+        user_id=current_user["user_id"],
+        organization_id=current_user["organization_id"],
+        provider="imap",
+        email_address=request.email_address,
+        imap_host=request.imap_host,
+        imap_port=request.imap_port,
+        username=request.username,
+        password_encrypted=request.password,
+    )
+
+    return {"status": "saved"}
+
+
+# =========================
+# Auth / User
+# =========================
 
 @app.post("/auth/register")
 def auth_register(request: RegisterRequest):
@@ -427,6 +605,10 @@ def me(current_user: dict = Depends(get_current_user)):
     return current_user
 
 
+# =========================
+# Admin / Superadmin
+# =========================
+
 @app.get("/admin/members")
 def admin_members(current_user: dict = Depends(get_current_user)):
     if current_user["role"] not in ["owner", "admin"]:
@@ -454,9 +636,7 @@ def admin_update_role(
         role=request.role,
     )
 
-    return {
-        "status": "updated",
-    }
+    return {"status": "updated"}
 
 
 @app.get("/superadmin/users")
@@ -494,40 +674,78 @@ def superadmin_update_user_role(
                     (request.role, request.user_id),
                 )
 
-                if cursor.rowcount == 0:
-                    raise HTTPException(status_code=404, detail="User membership not found")
+                updated_rows = cursor.rowcount
+
+                if updated_rows == 0:
+                    raise HTTPException(
+                        status_code=404,
+                        detail="User membership not found",
+                    )
 
         return {
             "status": "updated",
-            "updated_rows": cursor.rowcount,
+            "updated_rows": updated_rows,
         }
 
     finally:
         conn.close()
 
-@app.post("/email-connections/imap")
-def create_imap_connection(
-    request: ImapConnectionRequest,
-    current_user: dict = Depends(get_current_user),
-):
-    save_email_connection(
-        user_id=current_user["user_id"],
-        organization_id=current_user["organization_id"],
-        provider="imap",
-        email_address=request.email_address,
-        imap_host=request.imap_host,
-        imap_port=request.imap_port,
-        username=request.username,
-        password_encrypted=request.password,
-    )
 
-    return {
-        "status": "saved"
-    }
+@app.get("/superadmin/token-usage")
+def superadmin_token_usage(current_user: dict = Depends(get_current_user)):
+    if current_user.get("global_role") != "superadmin":
+        raise HTTPException(
+            status_code=403,
+            detail="Only superadmin can view token usage",
+        )
 
-@app.post("/emails/mark-read")
-def mark_email_read(
-    request: MarkEmailReadRequest,
+    conn = get_db_connection()
+
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    u.id AS user_id,
+                    u.email,
+                    u.full_name,
+                    COALESCE(SUM(a.total_tokens), 0) AS total_tokens,
+                    COALESCE(SUM(a.prompt_tokens), 0) AS prompt_tokens,
+                    COALESCE(SUM(a.completion_tokens), 0) AS completion_tokens,
+                    COALESCE(SUM(a.estimated_cost_usd), 0) AS estimated_cost_usd
+                FROM users u
+                LEFT JOIN ai_usage_logs a ON a.user_id = u.id
+                GROUP BY u.id, u.email, u.full_name
+                ORDER BY total_tokens DESC
+                """
+            )
+
+            rows = cursor.fetchall()
+
+        return [
+            {
+                "user_id": row[0],
+                "email": row[1],
+                "full_name": row[2],
+                "total_tokens": row[3],
+                "prompt_tokens": row[4],
+                "completion_tokens": row[5],
+                "estimated_cost_usd": float(row[6]),
+            }
+            for row in rows
+        ]
+
+    finally:
+        conn.close()
+
+
+# =========================
+# Follow-up Manager
+# =========================
+
+@app.post("/followups/generate")
+def generate_followups(
+    request: FollowupGenerateRequest,
     current_user: dict = Depends(get_current_user),
 ):
     connection = get_email_connection(current_user["user_id"])
@@ -538,44 +756,133 @@ def mark_email_read(
             detail="Email connection is not configured",
         )
 
-    provider = connection.get("provider")
+    emails = get_unread_imap_emails(
+        connection=connection,
+        limit=50,
+        date_from=None,
+        use_ai=False,
+    )
 
-    if provider == "imap":
-        mark_imap_email_as_read(
-            connection=connection,
-            email_id=request.email_id,
+    created = []
+
+    for email_item in emails:
+        if followup_exists(
+            organization_id=current_user["organization_id"],
+            user_id=current_user["user_id"],
+            email_id=email_item["id"],
+        ):
+            continue
+
+        is_direct = email_item.get("is_direct")
+        is_cc = email_item.get("is_cc")
+
+        if not is_direct:
+            continue
+
+        if is_cc and not is_direct:
+            continue
+
+        summary = summarize_email(
+            email_item.get("subject", ""),
+            email_item.get("from", ""),
+            email_item.get("snippet", ""),
+            user_id=current_user["user_id"],
+            organization_id=current_user["organization_id"],
         )
 
-        return {"status": "marked_as_read"}
-
-    raise HTTPException(
-        status_code=400,
-        detail=f"Mark as read not supported for provider: {provider}",
-    )
-
-@app.post("/emails/draft-reply-with-documents")
-def draft_reply_with_documents(
-    request: DraftReplyWithDocumentsRequest,
-    current_user: dict = Depends(get_current_user),
-):
-    if not request.document_id:
-        raise HTTPException(
-            status_code=400,
-            detail="Document must be selected",
+        insights = analyze_email_insights(
+            email_item.get("subject", ""),
+            email_item.get("from", ""),
+            email_item.get("snippet", ""),
         )
 
-    relevant_chunks = search_documents(
-        query=request.email_body,
-        document_id=request.document_id,
-    )
+        followup_id = create_followup_item(
+            organization_id=current_user["organization_id"],
+            user_id=current_user["user_id"],
+            email_id=email_item["id"],
+            sender=email_item.get("from", ""),
+            subject=email_item.get("subject", ""),
+            snippet=email_item.get("snippet", ""),
+            summary=summary,
+        )
 
-    draft = draft_email_reply_with_context(
-        email_subject=request.subject,
-        email_body=request.email_body,
-        context_chunks=relevant_chunks,
-    )
+        if not followup_id:
+            continue
+
+        created.append({
+            "id": followup_id,
+            **email_item,
+            "summary": summary,
+            "ai_insights": insights,
+        })
 
     return {
-        "draft": draft,
-        "context_chunks": relevant_chunks,
+        "created_count": len(created),
+        "followups": created,
     }
+
+
+@app.get("/followups")
+def list_followups(
+    current_user: dict = Depends(get_current_user),
+):
+    return {
+        "followups": get_followup_items(
+            organization_id=current_user["organization_id"],
+            user_id=current_user["user_id"],
+        )
+    }
+
+
+@app.post("/followups/{followup_id}/ignore")
+def ignore_followup(
+    followup_id: int,
+    current_user: dict = Depends(get_current_user),
+):
+    ignore_followup_item(
+        followup_id=followup_id,
+        organization_id=current_user["organization_id"],
+    )
+
+    return {"success": True}
+
+
+@app.post("/followups/{followup_id}/due-date")
+def set_followup_due_date(
+    followup_id: int,
+    request: FollowupDueDateRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    update_followup_due_date(
+        followup_id=followup_id,
+        organization_id=current_user["organization_id"],
+        due_date=request.due_date,
+    )
+
+    return {"success": True}
+
+
+@app.post("/followups/{followup_id}/share")
+def share_followup(
+    followup_id: int,
+    current_user: dict = Depends(get_current_user),
+):
+    share_followup_with_org(
+        followup_id=followup_id,
+        organization_id=current_user["organization_id"],
+    )
+
+    return {"success": True}
+
+
+@app.post("/followups/{followup_id}/done")
+def done_followup(
+    followup_id: int,
+    current_user: dict = Depends(get_current_user),
+):
+    mark_followup_done(
+        followup_id=followup_id,
+        organization_id=current_user["organization_id"],
+    )
+
+    return {"success": True}

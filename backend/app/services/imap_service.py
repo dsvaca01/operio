@@ -53,6 +53,7 @@ def get_unread_imap_emails(
     connection: dict,
     limit: int = 5,
     date_from: str | None = None,
+    use_ai: bool = True,
 ):
     host = connection["imap_host"]
     port = connection["imap_port"]
@@ -94,10 +95,19 @@ def get_unread_imap_emails(
 
         subject = _decode_header_value(message.get("Subject"))
         sender = _decode_header_value(message.get("From"))
+        to_recipients = _decode_header_value(message.get("To"))
+        cc_recipients = _decode_header_value(message.get("Cc"))
         body = _extract_body(message)
 
-        summary = summarize_email(subject, sender, body)
-        insights = analyze_email_insights(subject, sender, body)
+        is_direct = username.lower() in (to_recipients or "").lower()
+        is_cc = username.lower() in (cc_recipients or "").lower()
+
+        summary = ""
+        insights = {}
+
+        if use_ai:
+            summary = summarize_email(subject, sender, body)
+            insights = analyze_email_insights(subject, sender, body)
 
         output.append({
             "id": email_id.decode(),
@@ -106,6 +116,10 @@ def get_unread_imap_emails(
             "snippet": body[:300],
             "summary": summary,
             "ai_insights": insights,
+            "to": to_recipients,
+            "cc": cc_recipients,
+            "is_direct": is_direct,
+            "is_cc": is_cc,
         })
 
     mailbox.logout()

@@ -1,11 +1,20 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import {
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  Tooltip,
+  ResponsiveContainer,
+} from "recharts";
 
 type Member = {
   user_id: number;
   email: string;
   full_name: string | null;
+  organization_name?: string | null;
   organization_role: "owner" | "admin" | "member";
   global_role?: "user" | "superadmin";
 };
@@ -94,6 +103,35 @@ export default function AdminPage() {
     }
   };
 
+  const [tokenUsage, setTokenUsage] = useState<any[]>([]);
+
+  const loadTokenUsage = async () => {
+  try {
+    const token = getToken();
+
+    const response = await fetch(
+      `${API_URL}/superadmin/token-usage`,
+      {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      }
+    );
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      console.error(data);
+      return;
+    }
+
+    setTokenUsage(data);
+  } catch (error) {
+    console.error("Failed to load token usage", error);
+  }
+};
+
   const updateRole = async (
     userId: number,
     role: Member["organization_role"]
@@ -149,6 +187,7 @@ export default function AdminPage() {
 
   useEffect(() => {
     loadMembers();
+    loadTokenUsage();
   }, []);
 
   return (
@@ -220,9 +259,10 @@ export default function AdminPage() {
 
         <div className="overflow-hidden rounded-3xl border border-slate-800 bg-slate-900">
 
-          <div className="grid grid-cols-[1.5fr_1.5fr_1fr_1fr_1fr] border-b border-slate-800 bg-slate-950 px-5 py-4 text-xs font-semibold uppercase tracking-wide text-slate-500">
+          <div className="grid grid-cols-[1.5fr_1.5fr_1.5fr_1fr_1fr_1fr] border-b border-slate-800 bg-slate-950 px-5 py-4 text-xs font-semibold uppercase tracking-wide text-slate-500">
             <div>Uživatel</div>
             <div>Email</div>
+            <div>Organizace</div>
             <div>Org role</div>
             <div>Global role</div>
             <div>Akce</div>
@@ -237,7 +277,7 @@ export default function AdminPage() {
           {members.map((member) => (
             <div
               key={member.user_id}
-              className="grid grid-cols-[1.5fr_1.5fr_1fr_1fr_1fr] items-center border-b border-slate-800 px-5 py-4 text-sm last:border-b-0"
+              className="grid grid-cols-[1.5fr_1.5fr_1.5fr_1fr_1fr_1fr] items-center border-b border-slate-800 px-5 py-4 text-sm last:border-b-0"
             >
 
               <div className="font-medium text-slate-100">
@@ -246,6 +286,10 @@ export default function AdminPage() {
 
               <div className="text-slate-400">
                 {member.email}
+              </div>
+
+              <div className="text-slate-300">
+                {member.organization_name || "-"}
               </div>
 
               <div>
@@ -283,7 +327,10 @@ export default function AdminPage() {
                       e.target.value as Member["organization_role"]
                     )
                   }
-                  disabled={loading}
+                  disabled={
+                    loading ||
+                    (!isSuperadmin && currentUser?.role !== "owner")
+                  }
                   className="w-full rounded-xl border border-slate-700 bg-slate-950 p-2 text-sm outline-none focus:border-emerald-500 disabled:opacity-50"
                 >
                   <option value="owner">owner</option>
@@ -346,7 +393,71 @@ export default function AdminPage() {
 
           </div>
         </div>
+
+        <div className="mt-6 rounded-3xl border border-emerald-500/20 bg-slate-900/90 p-6 shadow-lg shadow-emerald-950/20">
+  <div className="flex items-start justify-between gap-4">
+    <div>
+      <h2 className="flex items-center gap-3 text-xl font-semibold text-slate-100">
+        <span className="rounded-2xl bg-emerald-500/10 px-3 py-2 text-emerald-400">
+          ▮▮▮
+        </span>
+        Token usage per uživatel
+      </h2>
+
+      <p className="mt-2 text-sm text-slate-400">
+        Přehled spotřeby AI tokenů podle uživatelů.
+      </p>
+    </div>
+  </div>
+
+  <div className="mt-6 h-80">
+    <ResponsiveContainer width="100%" height="100%">
+      <BarChart
+        data={tokenUsage}
+        margin={{ top: 20, right: 20, left: 0, bottom: 10 }}
+      >
+        <XAxis
+          dataKey="email"
+          axisLine={{ stroke: "#334155" }}
+          tickLine={false}
+          tick={{ fill: "#cbd5e1", fontSize: 12 }}
+        />
+
+        <YAxis
+          axisLine={{ stroke: "#334155" }}
+          tickLine={false}
+          tick={{ fill: "#cbd5e1", fontSize: 12 }}
+        />
+
+        <Tooltip
+          cursor={{ fill: "rgba(16, 185, 129, 0.08)" }}
+          contentStyle={{
+            backgroundColor: "#020617",
+            border: "1px solid rgba(16, 185, 129, 0.35)",
+            borderRadius: "16px",
+            color: "#e2e8f0",
+          }}
+          labelStyle={{
+            color: "#86efac",
+            fontWeight: 600,
+          }}
+        />
+
+        <Bar
+          dataKey="total_tokens"
+          name="Total tokens"
+          fill="#10b981"
+          radius={[10, 10, 0, 0]}
+        />
+      </BarChart>
+    </ResponsiveContainer>
+  </div>
+</div>
+
       </div>
+
+
+      
     </main>
   );
 }
