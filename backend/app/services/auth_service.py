@@ -1,21 +1,17 @@
-import os
 from datetime import datetime, timedelta
-
-from jose import jwt
-from passlib.context import CryptContext
-from sqlalchemy import text
-
-from app.services.db_service import engine
 
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from jose import JWTError
+from jose import JWTError, jwt
+from passlib.context import CryptContext
+from sqlalchemy import text
 
-SECRET_KEY = os.getenv("JWT_SECRET_KEY", "dev-secret-change-me")
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24
+from app.config import settings
+from app.services.db_service import engine
+
 
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
+security = HTTPBearer()
 
 
 def hash_password(password: str) -> str:
@@ -33,14 +29,18 @@ def verify_password(password: str, password_hash: str) -> bool:
 
 
 def create_access_token(data: dict) -> str:
-    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    expire = datetime.utcnow() + timedelta(minutes=settings.jwt_expire_minutes)
 
     payload = {
         **data,
         "exp": expire,
     }
 
-    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+    return jwt.encode(
+        payload,
+        settings.jwt_secret_key,
+        algorithm=settings.jwt_algorithm,
+    )
 
 
 def register_user(
@@ -100,12 +100,14 @@ def register_user(
             text("""
                 INSERT INTO email_connections (
                     user_id,
+                    organization_id,
                     provider,
                     email_address,
                     status
                 )
                 VALUES (
                     :user_id,
+                    :organization_id,
                     :provider,
                     :email_address,
                     'pending'
@@ -113,20 +115,21 @@ def register_user(
             """),
             {
                 "user_id": user.id,
+                "organization_id": organization.id,
                 "provider": email_provider,
                 "email_address": email_address or email,
             },
         )
 
     token = create_access_token(
-    {
-        "sub": str(user.id),
-        "email": user.email,
-        "organization_id": organization.id,
-        "role": "owner",
-        "global_role": "user",
-    }
-)
+        {
+            "sub": str(user.id),
+            "email": user.email,
+            "organization_id": organization.id,
+            "role": "owner",
+            "global_role": "user",
+        }
+    )
 
     return {
         "access_token": token,
@@ -170,15 +173,18 @@ def login_user(email: str, password: str):
             {"user_id": user.id},
         ).first()
 
+        if not membership:
+            raise ValueError("User has no organization membership")
+
     token = create_access_token(
-    {
-        "sub": str(user.id),
-        "email": user.email,
-        "organization_id": membership.organization_id,
-        "role": membership.role,
-        "global_role": user.global_role,
-    }
-)
+        {
+            "sub": str(user.id),
+            "email": user.email,
+            "organization_id": membership.organization_id,
+            "role": membership.role,
+            "global_role": user.global_role,
+        }
+    )
 
     return {
         "access_token": token,
@@ -192,8 +198,6 @@ def login_user(email: str, password: str):
         "role": membership.role,
     }
 
-security = HTTPBearer()
-
 
 def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
@@ -203,14 +207,23 @@ def get_current_user(
     try:
         payload = jwt.decode(
             token,
-            SECRET_KEY,
-            algorithms=[ALGORITHM],
+            settings.jwt_secret_key,
+            algorithms=[settings.jwt_algorithm],
         )
 
+        user_id = payload.get("sub")
+        organization_id = payload.get("organization_id")
+
+        if user_id is None or organization_id is None:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid token payload",
+            )
+
         return {
-            "user_id": int(payload.get("sub")),
+            "user_id": int(user_id),
             "email": payload.get("email"),
-            "organization_id": int(payload.get("organization_id")),
+            "organization_id": int(organization_id),
             "role": payload.get("role"),
             "global_role": payload.get("global_role", "user"),
         }

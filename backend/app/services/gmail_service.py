@@ -1,5 +1,6 @@
 import base64
 import json
+from app.config import settings
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +20,7 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 CREDENTIALS_PATH = BASE_DIR / "credentials" / "gmail_credentials.json"
 TOKEN_PATH = BASE_DIR / "credentials" / "gmail_token.json"
 
-client = OpenAI()
+client = OpenAI(api_key=settings.openai_api_key)
 
 
 def get_gmail_client():
@@ -133,7 +134,7 @@ Email:
 {body[:6000]}
 """
 
-    model = "gpt-4o-mini"
+    model = settings.openai_model_default
 
     response = client.chat.completions.create(
         model=model,
@@ -311,7 +312,7 @@ Příklady suggested_action:
 """
 
     try:
-        model = "gpt-4.1-mini"
+        model = settings.openai_model_json
 
         response = client.chat.completions.create(
             model=model,
@@ -390,7 +391,7 @@ AI summary:
 {summary}
 """
 
-    model = "gpt-4o-mini"
+    model = settings.openai_model_default
 
     response = client.chat.completions.create(
         model=model,
@@ -454,7 +455,7 @@ Email summaries:
 {email_text}
 """
 
-    model = "gpt-4o-mini"
+    model = settings.openai_model_default
 
     response = client.chat.completions.create(
         model=model,
@@ -516,7 +517,7 @@ KONTEXT Z DOKUMENTŮ:
 {context}
 """
 
-    model = "gpt-4.1-mini"
+    model = settings.openai_model_json
 
     response = client.chat.completions.create(
         model=model,
@@ -644,7 +645,7 @@ Email timeline:
 {email_text[:16000]}
 """
 
-    model = "gpt-4o-mini"
+    model = settings.openai_model_default
 
     response = client.chat.completions.create(
         model=model,

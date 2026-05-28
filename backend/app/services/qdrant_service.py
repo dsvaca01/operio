@@ -1,17 +1,21 @@
-import os
 import uuid
 
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct
-from qdrant_client.models import Filter, FieldCondition, MatchValue
+from qdrant_client.models import (
+    Distance,
+    FieldCondition,
+    Filter,
+    MatchValue,
+    PointStruct,
+    VectorParams,
+)
+
+from app.config import settings
 
 
+COLLECTION_NAME = settings.qdrant_collection
 
-QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
-COLLECTION_NAME = "operio_documents"
-VECTOR_SIZE = 1536
-
-client = QdrantClient(url=QDRANT_URL)
+client = QdrantClient(url=settings.qdrant_url)
 
 
 def ensure_collection() -> None:
@@ -22,7 +26,7 @@ def ensure_collection() -> None:
         client.create_collection(
             collection_name=COLLECTION_NAME,
             vectors_config=VectorParams(
-                size=VECTOR_SIZE,
+                size=settings.qdrant_vector_size,
                 distance=Distance.COSINE,
             ),
         )
@@ -69,7 +73,11 @@ def upsert_chunks(
 
     return len(points)
 
-def delete_document_chunks(document_id: str):
+
+def delete_document_chunks(
+    document_id: str,
+    organization_id: int,
+):
     client.delete(
         collection_name=COLLECTION_NAME,
         points_selector=Filter(
@@ -77,7 +85,11 @@ def delete_document_chunks(document_id: str):
                 FieldCondition(
                     key="document_id",
                     match=MatchValue(value=document_id),
-                )
+                ),
+                FieldCondition(
+                    key="organization_id",
+                    match=MatchValue(value=organization_id),
+                ),
             ]
         ),
     )

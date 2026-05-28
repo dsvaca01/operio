@@ -4,11 +4,8 @@ services:
     container_name: operio-backend
     ports:
       - "8000:8000"
-    environment:
-      - APP_NAME=Operio
-      - DATABASE_URL=postgresql://operio:operio@postgres:5432/operio
-      - QDRANT_URL=http://qdrant:6333
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    env_file:
+      - ./backend/.env
     depends_on:
       - postgres
       - qdrant

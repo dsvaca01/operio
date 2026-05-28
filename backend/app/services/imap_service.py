@@ -7,6 +7,7 @@ from email.utils import parseaddr, parsedate_to_datetime
 import re
 
 from app.services.gmail_service import summarize_email, analyze_email_insights
+from app.config import settings
 
 
 PERSONAL_EMAIL_DOMAINS = {
@@ -323,7 +324,11 @@ def get_unread_imap_emails(
     username = connection["username"]
     password = connection["password_encrypted"]
 
-    mailbox = imaplib.IMAP4_SSL(host, port)
+    mailbox = imaplib.IMAP4_SSL(
+    host,
+    port,
+    timeout=settings.email_connection_timeout,
+)
     mailbox.login(username, password)
     mailbox.select("INBOX")
 
@@ -454,7 +459,11 @@ def get_client_imap_conversation_emails(
 
     max_scan_per_mailbox = max(50, safe_limit * 10)
 
-    mailbox = imaplib.IMAP4_SSL(host, port)
+    mailbox = imaplib.IMAP4_SSL(
+    host,
+    port,
+    timeout=settings.email_connection_timeout,
+)
     mailbox.login(username, password)
 
     mailboxes_to_scan = ["INBOX"]
@@ -529,7 +538,11 @@ def mark_imap_email_as_read(connection: dict, email_id: str):
     username = connection["username"]
     password = connection["password_encrypted"]
 
-    mailbox = imaplib.IMAP4_SSL(host, port)
+    mailbox = imaplib.IMAP4_SSL(
+    host,
+    port,
+    timeout=settings.email_connection_timeout,
+)
     mailbox.login(username, password)
     mailbox.select("INBOX")
 

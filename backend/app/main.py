@@ -4,11 +4,10 @@ from fastapi.responses import StreamingResponse
 from pathlib import Path
 from pydantic import BaseModel
 
-import os
 import shutil
 import uuid
-import psycopg2
 
+from app.config import settings
 from app.services.auth_service import (
     get_current_user,
     login_user,
@@ -22,6 +21,7 @@ from app.services.db_service import (
     email_item_exists,
     followup_exists,
     get_all_users,
+    get_db_connection,
     get_documents,
     get_email_connection,
     get_email_items,
@@ -61,21 +61,21 @@ from app.services.qdrant_service import (
 from app.services.search_service import search_documents
 
 
-app = FastAPI(title="Operio API")
+app = FastAPI(title=f"{settings.app_name} API")
 init_db()
 
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=settings.cors_origin_list,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-UPLOAD_DIR = Path("uploads")
-UPLOAD_DIR.mkdir(exist_ok=True)
+UPLOAD_DIR = settings.upload_dir
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # =========================
@@ -159,22 +159,10 @@ class ClientContextPreviewRequest(BaseModel):
 # Internal helpers
 # =========================
 
-def get_db_connection():
-    database_url = os.getenv("DATABASE_URL")
-
-    if not database_url:
-        raise HTTPException(
-            status_code=500,
-            detail="DATABASE_URL is not configured",
-        )
-
-    return psycopg2.connect(database_url)
-
-
 def sync_unread_emails_to_db(
     current_user: dict,
     date_from: str | None = None,
-    limit: int = 50,
+    limit: int | None = None,
     use_ai_for_imap: bool = False,
 ):
     """
@@ -198,9 +186,11 @@ def sync_unread_emails_to_db(
             detail="Email connection is not configured",
         )
 
+    effective_limit = limit or settings.email_fetch_limit
+
     emails = get_unread_imap_emails(
         connection=connection,
-        limit=limit,
+        limit=effective_limit,
         date_from=date_from,
         use_ai=use_ai_for_imap,
     )
@@ -232,12 +222,16 @@ def sync_unread_emails_to_db(
             email_item.get("subject", ""),
             email_item.get("from", ""),
             email_item.get("snippet", ""),
+            user_id=current_user["user_id"],
+            organization_id=current_user["organization_id"],
         )
 
         insights = analyze_email_insights(
             email_item.get("subject", ""),
             email_item.get("from", ""),
             email_item.get("snippet", ""),
+            user_id=current_user["user_id"],
+            organization_id=current_user["organization_id"],
         )
 
         save_email_item(
@@ -275,9 +269,12 @@ def sync_unread_emails_to_db(
 def health_check():
     return {
         "status": "ok",
-        "app": os.getenv("APP_NAME", "Operio"),
-        "database_url_set": bool(os.getenv("DATABASE_URL")),
-        "qdrant_url": os.getenv("QDRANT_URL"),
+        "app": settings.app_name,
+        "env": settings.app_env,
+        "debug": settings.debug,
+        "database_configured": bool(settings.database_url),
+        "qdrant_url": settings.qdrant_url,
+        "cors_origins": settings.cors_origin_list,
     }
 
 
@@ -315,6 +312,15 @@ def upload_document(
         shutil.copyfileobj(file.file, buffer)
 
     file_size = file_path.stat().st_size
+    max_upload_bytes = settings.max_upload_mb * 1024 * 1024
+
+    if file_size > max_upload_bytes:
+        file_path.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=400,
+            detail=f"File is too large. Max size is {settings.max_upload_mb} MB",
+        )
+
     extracted_text = None
 
     if extension == ".pdf":
@@ -378,7 +384,10 @@ def delete_document_endpoint(
         user_id=current_user["user_id"],
     )
 
-    delete_document_chunks(document_id)
+    delete_document_chunks(
+        document_id=document_id,
+        organization_id=current_user["organization_id"],
+    )
 
     file_path = UPLOAD_DIR / document_id
     if file_path.exists():
@@ -391,32 +400,47 @@ def delete_document_endpoint(
 
 
 @app.get("/search")
-def search(query: str):
+def search(
+    query: str,
+    current_user: dict = Depends(get_current_user),
+):
     return {
         "query": query,
-        "results": search_documents(query),
+        "results": search_documents(
+            query=query,
+            organization_id=current_user["organization_id"],
+            user_id=current_user["user_id"],
+        ),
     }
 
 
 @app.post("/chat")
-def chat(request: ChatRequest):
+def chat(
+    request: ChatRequest,
+    current_user: dict = Depends(get_current_user),
+):
     return answer_question(
         query=request.query,
         document_id=request.document_id,
+        organization_id=current_user["organization_id"],
+        user_id=current_user["user_id"],
     )
 
 
 @app.post("/chat/stream")
-def chat_stream(request: ChatRequest):
+def chat_stream(
+    request: ChatRequest,
+    current_user: dict = Depends(get_current_user),
+):
     return StreamingResponse(
         stream_answer_question(
             query=request.query,
             document_id=request.document_id,
+            organization_id=current_user["organization_id"],
+            user_id=current_user["user_id"],
         ),
         media_type="text/plain",
     )
-
-
 
 
 # =========================
@@ -452,7 +476,13 @@ def client_context_preview(
             detail="Invalid scope. Allowed values: email, domain",
         )
 
-    limit = max(1, min(request.limit or 10, 10))
+    limit = max(
+        1,
+        min(
+            request.limit or settings.client_context_max_limit,
+            settings.client_context_max_limit,
+        ),
+    )
 
     if scope == "email" and not request.client_email:
         raise HTTPException(
@@ -514,7 +544,7 @@ def unread_emails(
     sync_unread_emails_to_db(
         current_user=current_user,
         date_from=date_from,
-        limit=50,
+        limit=settings.email_fetch_limit,
         use_ai_for_imap=False,
     )
 
@@ -536,7 +566,7 @@ def sync_emails(
     synced = sync_unread_emails_to_db(
         current_user=current_user,
         date_from=date_from,
-        limit=50,
+        limit=settings.email_fetch_limit,
         use_ai_for_imap=False,
     )
 
@@ -605,7 +635,11 @@ def email_overview(
     current_user: dict = Depends(get_current_user),
 ):
     return {
-        "overview": create_email_overview(request.emails),
+        "overview": create_email_overview(
+            request.emails,
+            user_id=current_user["user_id"],
+            organization_id=current_user["organization_id"],
+        ),
     }
 
 
@@ -623,6 +657,8 @@ def draft_reply_with_documents(
     relevant_chunks = search_documents(
         query=request.email_body,
         document_id=request.document_id,
+        organization_id=current_user["organization_id"],
+        user_id=current_user["user_id"],
     )
 
     draft = draft_email_reply_with_context(
@@ -852,7 +888,7 @@ def generate_followups(
 
     emails = get_unread_imap_emails(
         connection=connection,
-        limit=50,
+        limit=settings.email_fetch_limit,
         date_from=None,
         use_ai=False,
     )
@@ -888,6 +924,8 @@ def generate_followups(
             email_item.get("subject", ""),
             email_item.get("from", ""),
             email_item.get("snippet", ""),
+            user_id=current_user["user_id"],
+            organization_id=current_user["organization_id"],
         )
 
         followup_id = create_followup_item(
