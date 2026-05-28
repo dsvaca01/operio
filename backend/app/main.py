@@ -42,12 +42,14 @@ from app.services.db_service import (
 )
 from app.services.gmail_service import (
     analyze_email_insights,
+    create_client_context_briefing,
     create_email_overview,
     draft_email_reply,
     draft_email_reply_with_context,
     summarize_email,
 )
 from app.services.imap_service import (
+    get_client_imap_conversation_emails,
     get_unread_imap_emails,
     mark_imap_email_as_read,
 )
@@ -144,6 +146,13 @@ class FollowupGenerateRequest(BaseModel):
 
 class FollowupDueDateRequest(BaseModel):
     due_date: str | None = None
+
+
+class ClientContextPreviewRequest(BaseModel):
+    client_email: str | None = None
+    client_domain: str | None = None
+    scope: str = "email"  # email | domain
+    limit: int = 10
 
 
 # =========================
@@ -406,6 +415,91 @@ def chat_stream(request: ChatRequest):
         ),
         media_type="text/plain",
     )
+
+
+
+
+# =========================
+# Clients / Client Context Briefing
+# =========================
+
+@app.post("/clients/context/preview")
+def client_context_preview(
+    request: ClientContextPreviewRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    connection = get_email_connection(current_user["user_id"])
+
+    if not connection:
+        raise HTTPException(
+            status_code=404,
+            detail="Email connection is not configured",
+        )
+
+    provider = connection.get("provider")
+
+    if provider != "imap":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Client context preview is not supported for provider: {provider}",
+        )
+
+    scope = (request.scope or "email").lower().strip()
+
+    if scope not in {"email", "domain"}:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid scope. Allowed values: email, domain",
+        )
+
+    limit = max(1, min(request.limit or 10, 10))
+
+    if scope == "email" and not request.client_email:
+        raise HTTPException(
+            status_code=400,
+            detail="client_email is required for email scope",
+        )
+
+    if scope == "domain" and not request.client_domain:
+        raise HTTPException(
+            status_code=400,
+            detail="client_domain is required for domain scope",
+        )
+
+    try:
+        emails = get_client_imap_conversation_emails(
+            connection=connection,
+            client_email=request.client_email,
+            client_domain=request.client_domain,
+            scope=scope,
+            limit=limit,
+        )
+    except ValueError as error:
+        raise HTTPException(
+            status_code=400,
+            detail=str(error),
+        )
+
+    client_label = request.client_email if scope == "email" else request.client_domain
+
+    briefing = create_client_context_briefing(
+        emails=emails,
+        client_label=client_label or "",
+        scope=scope,
+        user_id=current_user["user_id"],
+        organization_id=current_user["organization_id"],
+    )
+
+    return {
+        "scope": scope,
+        "client_email": request.client_email,
+        "client_domain": request.client_domain,
+        "limit": limit,
+        "messages_count": len(emails),
+        "emails_count": len(emails),
+        "emails": emails,
+        "briefing": briefing,
+    }
 
 
 # =========================

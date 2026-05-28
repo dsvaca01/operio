@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import NeuralNetworkBackground from "@/components/NeuralNetworkBackground";
 
-type AssistantType = "knowledge" | "email" | "followup";
+type AssistantType = "knowledge" | "email" | "followup" | "client";
 
 type Message = {
   role: "user" | "assistant";
@@ -46,6 +47,30 @@ type FollowupItem = {
   replyInstruction?: string;
 };
 
+type ClientScope = "email" | "domain";
+
+type ClientContextEmail = {
+  id: string;
+  from: string;
+  from_email?: string;
+  from_domain?: string;
+  direction?: "INBOUND" | "OUTBOUND";
+  mailbox?: string;
+  subject: string;
+  snippet: string;
+  date?: string | null;
+};
+
+type ClientContextPreview = {
+  scope: ClientScope;
+  client_email?: string | null;
+  client_domain?: string | null;
+  limit: number;
+  emails_count: number;
+  emails: ClientContextEmail[];
+  briefing: string;
+};
+
 type Source = {
   score: number;
   text: string;
@@ -80,6 +105,14 @@ export default function Home() {
   const [followups, setFollowups] = useState<FollowupItem[]>([]);
   const [followupDaysBack, setFollowupDaysBack] = useState(7);
   const [followupLoading, setFollowupLoading] = useState(false);
+
+  const [clientScope, setClientScope] = useState<ClientScope>("email");
+  const [clientEmail, setClientEmail] = useState("");
+  const [clientDomain, setClientDomain] = useState("");
+  const [clientLimit, setClientLimit] = useState(10);
+  const [clientLoading, setClientLoading] = useState(false);
+  const [clientContextPreview, setClientContextPreview] =
+    useState<ClientContextPreview | null>(null);
 
   const [loading, setLoading] = useState(false);
   const [uploadStatus, setUploadStatus] = useState("");
@@ -539,6 +572,60 @@ const shareFollowup = async (followupId: number) => {
     }
   };
 
+  const generateClientContextPreview = async () => {
+    const normalizedEmail = clientEmail.trim();
+    const normalizedDomain = clientDomain
+      .trim()
+      .replace(/^@/, "")
+      .toLowerCase();
+
+    if (clientScope === "email" && !normalizedEmail) {
+      alert("Zadej email klienta.");
+      return;
+    }
+
+    if (clientScope === "domain" && !normalizedDomain) {
+      alert("Zadej doménu firmy.");
+      return;
+    }
+
+    try {
+      setClientLoading(true);
+      setClientContextPreview(null);
+
+      const token = localStorage.getItem("access_token");
+
+      const response = await fetch(`${API_URL}/clients/context/preview`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          scope: clientScope,
+          client_email: clientScope === "email" ? normalizedEmail : null,
+          client_domain: clientScope === "domain" ? normalizedDomain : null,
+          limit: clientLimit,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        console.error("Client context preview failed", data);
+        alert(data.detail || "Nepodařilo se vytvořit klientský briefing.");
+        return;
+      }
+
+      setClientContextPreview(data);
+    } catch (error) {
+      console.error("Client context preview failed", error);
+      alert("Nepodařilo se vytvořit klientský briefing. Zkontroluj backend.");
+    } finally {
+      setClientLoading(false);
+    }
+  };
+
   const uploadFile = async () => {
     if (!file) return;
 
@@ -623,71 +710,63 @@ const shareFollowup = async (followupId: number) => {
   };
 
   const askQuestion = async () => {
-    if (!query.trim()) return;
+  if (!query.trim()) return;
 
-    const userQuestion = query;
+  const userQuestion = query;
 
-    try {
-      setLoading(true);
-      setSources([]);
-      setQuery("");
+  try {
+    setLoading(true);
+    setSources([]);
+    setQuery("");
 
-      setMessages((prev) => [
-        { role: "assistant", content: "" },
-        { role: "user", content: userQuestion },
-        ...prev,
-      ]);
+    const response = await fetch(`${API_URL}/chat`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        query: userQuestion,
+        document_id: selectedDocumentId || null,
+      }),
+    });
 
-      const response = await fetch(`${API_URL}/chat/stream`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          query: userQuestion,
-          document_id: selectedDocumentId || null,
-        }),
-      });
+    const data = await response.json();
 
-      if (!response.body) {
-        throw new Error("No response body");
-      }
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-
-      while (true) {
-        const { value, done } = await reader.read();
-
-        if (done) break;
-
-        const chunk = decoder.decode(value);
-
-        setMessages((prev) => {
-          const updated = [...prev];
-
-          updated[0] = {
-            ...updated[0],
-            content: updated[0].content + chunk,
-          };
-
-          return updated;
-        });
-      }
-    } catch (error) {
-      console.error("Streaming failed", error);
-
-      setMessages((prev) => [
-        {
-          role: "assistant",
-          content: "Odpověď se nepodařilo načíst.",
-        },
-        ...prev,
-      ]);
-    } finally {
-      setLoading(false);
+    if (!response.ok) {
+      throw new Error(data.detail || "Chat failed");
     }
-  };
+
+    setMessages((prev) => [
+      {
+        role: "assistant",
+        content: data.answer || "Bez odpovědi.",
+      },
+      {
+        role: "user",
+        content: userQuestion,
+      },
+      ...prev,
+    ]);
+
+    setSources(data.citations || []);
+  } catch (error) {
+    console.error("Chat failed", error);
+
+    setMessages((prev) => [
+      {
+        role: "assistant",
+        content: "Odpověď se nepodařilo načíst.",
+      },
+      {
+        role: "user",
+        content: userQuestion,
+      },
+      ...prev,
+    ]);
+  } finally {
+    setLoading(false);
+  }
+};
 
   useEffect(() => {
     loadDocuments();
@@ -758,6 +837,21 @@ const shareFollowup = async (followupId: number) => {
 
               <p className="mt-1 text-xs opacity-70">
                 Čekající odpovědi a úkoly
+              </p>
+            </button>
+
+            <button
+              onClick={() => setActiveAssistant("client")}
+              className={`w-full rounded-2xl px-4 py-4 text-left transition ${
+                activeAssistant === "client"
+                  ? "bg-cyan-500 text-white"
+                  : "bg-slate-950 text-slate-300 hover:bg-slate-800"
+              }`}
+            >
+              <p className="font-semibold">Client Context</p>
+
+              <p className="mt-1 text-xs opacity-70">
+                Briefing před schůzkou
               </p>
             </button>
           </div>
@@ -1104,7 +1198,7 @@ const shareFollowup = async (followupId: number) => {
 
                     <div>
                       <label className="text-xs uppercase tracking-wide text-slate-500">
-                        Počet emailů
+                        Počet zpráv
                       </label>
 
                       <input
@@ -1259,6 +1353,249 @@ const shareFollowup = async (followupId: number) => {
                         )}
                       </div>
                     ))}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {activeAssistant === "client" && (
+              <div className="space-y-8">
+                <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+                  <div>
+                    <p className="text-sm font-medium uppercase tracking-wide text-cyan-300">
+                      Client Context
+                    </p>
+
+                    <h2 className="mt-2 text-4xl font-bold">
+                      Briefing před schůzkou
+                    </h2>
+
+                    <p className="mt-3 max-w-2xl text-slate-400">
+                      Načte poslední emaily od konkrétního klienta nebo celé firmy podle domény
+                      a vytvoří praktické shrnutí aktuálního stavu spolupráce.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="grid gap-6 lg:grid-cols-[380px_1fr]">
+                  <div className="rounded-3xl border border-slate-800 bg-slate-900 p-6">
+                    <h3 className="text-xl font-semibold">Zdroj kontextu</h3>
+
+                    <p className="mt-2 text-sm text-slate-400">
+                      MVP čte poslední zprávy z INBOXu i odeslané pošty přes IMAP. Emaily se neoznačí jako přečtené.
+                    </p>
+
+                    <div className="mt-6 grid gap-3 sm:grid-cols-2">
+                      <button
+                        onClick={() => setClientScope("email")}
+                        className={`rounded-2xl px-4 py-3 text-sm font-semibold ${
+                          clientScope === "email"
+                            ? "bg-cyan-500 text-white"
+                            : "bg-slate-950 text-slate-300 hover:bg-slate-800"
+                        }`}
+                      >
+                        Jedna adresa
+                      </button>
+
+                      <button
+                        onClick={() => setClientScope("domain")}
+                        className={`rounded-2xl px-4 py-3 text-sm font-semibold ${
+                          clientScope === "domain"
+                            ? "bg-cyan-500 text-white"
+                            : "bg-slate-950 text-slate-300 hover:bg-slate-800"
+                        }`}
+                      >
+                        Celá doména
+                      </button>
+                    </div>
+
+                    {clientScope === "email" && (
+                      <div className="mt-5">
+                        <label className="text-xs uppercase tracking-wide text-slate-500">
+                          Email klienta
+                        </label>
+
+                        <input
+                          type="email"
+                          value={clientEmail}
+                          onChange={(e) => setClientEmail(e.target.value)}
+                          placeholder="např. klient@firma.cz"
+                          className="mt-2 w-full rounded-2xl border border-slate-800 bg-slate-950 p-3 text-sm outline-none focus:border-cyan-500"
+                        />
+                      </div>
+                    )}
+
+                    {clientScope === "domain" && (
+                      <div className="mt-5">
+                        <label className="text-xs uppercase tracking-wide text-slate-500">
+                          Doména firmy
+                        </label>
+
+                        <input
+                          type="text"
+                          value={clientDomain}
+                          onChange={(e) => setClientDomain(e.target.value)}
+                          placeholder="např. firma.cz"
+                          className="mt-2 w-full rounded-2xl border border-slate-800 bg-slate-950 p-3 text-sm outline-none focus:border-cyan-500"
+                        />
+                      </div>
+                    )}
+
+                    <div className="mt-5">
+                      <label className="text-xs uppercase tracking-wide text-slate-500">
+                        Počet zpráv
+                      </label>
+
+                      <select
+                        value={clientLimit}
+                        onChange={(e) => setClientLimit(Number(e.target.value))}
+                        className="mt-2 w-full rounded-2xl border border-slate-800 bg-slate-950 p-3 text-sm outline-none focus:border-cyan-500"
+                      >
+                        <option value={5}>Posledních 5 zpráv</option>
+                        <option value={10}>Posledních 10 zpráv</option>
+                        <option value={20}>Posledních 20 zpráv</option>
+                      </select>
+                    </div>
+
+                    <button
+                      onClick={generateClientContextPreview}
+                      disabled={clientLoading}
+                      className="mt-6 w-full rounded-2xl bg-cyan-500 px-5 py-3 text-sm font-semibold text-white hover:bg-cyan-400 disabled:opacity-50"
+                    >
+                      {clientLoading ? "Vytvářím briefing..." : "Vytvořit briefing"}
+                    </button>
+
+                    <div className="mt-5 rounded-2xl border border-slate-800 bg-slate-950 p-4 text-sm text-slate-400">
+                      Doporučení: začni s 10 zprávami. Full historie patří až do další fáze přes uloženou klientskou paměť.
+                    </div>
+                  </div>
+
+                  <div className="space-y-6">
+                    <div className="rounded-3xl border border-slate-800 bg-slate-900 p-6">
+                      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                        <div>
+                          <h3 className="text-xl font-semibold">AI briefing</h3>
+
+                          <p className="mt-2 text-sm text-slate-400">
+                            Stav klienta, otevřené body, rizika a doporučený další krok.
+                          </p>
+                        </div>
+
+                        {clientContextPreview && (
+                          <span className="rounded-full border border-cyan-500/40 bg-cyan-500/10 px-3 py-1 text-xs font-semibold text-cyan-300">
+                            {clientContextPreview.emails_count} zpráv
+                          </span>
+                        )}
+                      </div>
+
+                      {!clientContextPreview && !clientLoading && (
+                        <p className="mt-6 rounded-2xl bg-slate-950 p-5 text-sm text-slate-500">
+                          Zadej klienta nebo doménu a vytvoř briefing.
+                        </p>
+                      )}
+
+                      {clientLoading && (
+                        <p className="mt-6 rounded-2xl bg-slate-950 p-5 text-sm text-slate-400">
+                          Načítám emaily a tvořím kontext...
+                        </p>
+                      )}
+
+                      {clientContextPreview && (
+                        <div className="mt-6 rounded-2xl border border-cyan-800 bg-cyan-950/20 p-5">
+                          <div className="mb-4 flex flex-wrap gap-2">
+                            <span className="rounded-full bg-slate-950 px-3 py-1 text-xs text-slate-300">
+                              Scope: {clientContextPreview.scope === "email" ? "jedna adresa" : "doména"}
+                            </span>
+
+                            <span className="rounded-full bg-slate-950 px-3 py-1 text-xs text-slate-300">
+                              {clientContextPreview.scope === "email"
+                                ? clientContextPreview.client_email
+                                : clientContextPreview.client_domain}
+                            </span>
+                          </div>
+
+                          <div className="whitespace-pre-wrap text-sm leading-7 text-slate-100">
+                            {clientContextPreview.briefing}
+                          </div>
+
+                          <button
+                            onClick={() => copyToClipboard(clientContextPreview.briefing)}
+                            className="mt-5 rounded-2xl bg-white px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-slate-200"
+                          >
+                            Kopírovat briefing
+                          </button>
+                        </div>
+                      )}
+                    </div>
+
+                    {clientContextPreview && (
+                      <div className="rounded-3xl border border-slate-800 bg-slate-900 p-6">
+                        <h3 className="text-xl font-semibold">Použité emaily</h3>
+
+                        <p className="mt-2 text-sm text-slate-400">
+                          Kontrola vstupů, ze kterých AI briefing vznikl. Timeline rozlišuje příchozí a odeslané zprávy.
+                        </p>
+
+                        <div className="mt-5 space-y-3">
+                          {clientContextPreview.emails.length === 0 && (
+                            <p className="rounded-2xl bg-slate-950 p-4 text-sm text-slate-500">
+                              Nebyly nalezeny žádné emaily pro zadaný filtr.
+                            </p>
+                          )}
+
+                          {clientContextPreview.emails.map((email) => (
+                            <div
+                              key={email.id}
+                              className="rounded-2xl border border-slate-800 bg-slate-950 p-4"
+                            >
+                              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                                <div>
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    <span
+                                      className={`rounded-full px-2 py-1 text-[11px] font-semibold ${
+                                        email.direction === "INBOUND"
+                                          ? "bg-emerald-500/20 text-emerald-300"
+                                          : "bg-blue-500/20 text-blue-300"
+                                      }`}
+                                    >
+                                      {email.direction === "INBOUND"
+                                        ? "Klient → Vy"
+                                        : "Vy → Klient"}
+                                    </span>
+
+                                    {email.mailbox && (
+                                      <span className="rounded-full bg-slate-900 px-2 py-1 text-[11px] text-slate-400">
+                                        {email.mailbox}
+                                      </span>
+                                    )}
+                                  </div>
+
+                                  <p className="mt-3 text-sm text-slate-500">
+                                    {email.from}
+                                  </p>
+
+                                  <h4 className="mt-1 font-semibold text-slate-100">
+                                    {email.subject || "(bez předmětu)"}
+                                  </h4>
+                                </div>
+
+                                {email.date && (
+                                  <span className="rounded-full bg-slate-900 px-3 py-1 text-xs text-slate-400">
+                                    {email.date}
+                                  </span>
+                                )}
+                              </div>
+
+                              {email.snippet && (
+                                <p className="mt-3 line-clamp-3 text-sm text-slate-500">
+                                  {email.snippet}
+                                </p>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>

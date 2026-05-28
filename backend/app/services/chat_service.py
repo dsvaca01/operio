@@ -48,11 +48,20 @@ Context:
     answer = response.choices[0].message.content
 
     return {
-        "query": query,
-        "document_id": document_id,
-        "answer": answer,
-        "sources": search_results,
-    }
+    "query": query,
+    "document_id": document_id,
+    "answer": answer,
+    "citations": [
+        {
+            "filename": item["filename"],
+            "document_id": item["document_id"],
+            "chunk_index": item["chunk_index"],
+            "text": item["text"],
+            "score": item.get("score"),
+        }
+        for item in search_results
+    ],
+}
 
 def stream_answer_question(query: str, document_id: str | None = None):
     search_results = search_documents(

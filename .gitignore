@@ -1,4 +1,43 @@
+# Secrets / env
+.env
+.env.*
+*.env
+backend/.env
+frontend/.env.local
+frontend/.env.production
+postgres.env
+
+# Credentials / tokens
+backend/credentials/
 backend/Credentials/
+**/credentials/
+**/Credentials/
+*token*.json
+*credentials*.json
+gmail_token.json
+gmail_credentials.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+dist/
+build/
+
+# Uploads / local files
+uploads/
+backend/uploads/
+
+# Logs
+*.log
+logs/backend/Credentials/
 backend/credentials/
 
 # Env

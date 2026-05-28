@@ -546,3 +546,131 @@ KONTEXT Z DOKUMENTŮ:
     )
 
     return response.choices[0].message.content or ""
+
+
+def create_client_context_briefing(
+    emails: list[dict],
+    client_label: str,
+    scope: str,
+    user_id: int | None = None,
+    organization_id: int | None = None,
+) -> str:
+    """
+    Vytvoří meeting/client briefing z poslední obousměrné komunikace s klientem.
+
+    Vstup očekává list emailů ve tvaru:
+    - date
+    - direction: INBOUND / OUTBOUND
+    - mailbox
+    - from
+    - to
+    - cc
+    - subject
+    - snippet
+    """
+    if not emails:
+        return "Pro zadaného klienta nebyla nalezena žádná komunikace."
+
+    email_text = "\n\n".join(
+        [
+            (
+                f"Datum: {email.get('date', '')}\n"
+                f"Směr: {email.get('direction', '')}\n"
+                f"Mailbox: {email.get('mailbox', '')}\n"
+                f"Od: {email.get('from', '')}\n"
+                f"Komu: {email.get('to', '')}\n"
+                f"Kopie: {email.get('cc', '')}\n"
+                f"Předmět: {email.get('subject', '')}\n"
+                f"Obsah / snippet: {email.get('snippet', '')}"
+            )
+            for email in emails
+        ]
+    )
+
+    prompt = f"""
+Jsi seniorní AI asistent pro account management a přípravu na schůzky.
+
+Vytvoř praktický klientský briefing v češtině z obousměrné emailové komunikace.
+
+Klient / scope:
+{client_label}
+
+Typ rozsahu:
+{scope}
+
+DŮLEŽITÉ:
+- INBOUND = klient / firma psala nám.
+- OUTBOUND = my jsme psali klientovi / firmě.
+- Sleduj hlavně, kdo je aktuálně na tahu.
+- Rozliš, co klient požadoval a co už jsme odpověděli nebo slíbili.
+- Nepředpokládej, že otevřený bod stále trvá, pokud je v OUTBOUND odpovědi zjevně vyřešený.
+- Použij pouze informace z dodaných emailů.
+- Nevymýšlej fakta.
+- Pokud něco není jasné, napiš, že to není z emailů zřejmé.
+
+Vrať markdown v této struktuře:
+
+## Aktuální stav klienta
+Stručně popiš, v jaké fázi komunikace/spolupráce jsme.
+
+## Kdo je aktuálně na tahu
+- Napiš jasně, zda čekáme na klienta, nebo klient čeká na nás.
+- Pokud to není zřejmé, napiš to.
+
+## Co se momentálně řeší
+- ...
+
+## Co už jsme odpověděli / slíbili
+- ...
+
+## Otevřené body
+- ...
+
+## Rizika / blokery
+- ...
+
+## Poslední důležitá komunikace
+- ...
+
+## Doporučené next steps
+- ...
+
+## Příprava na schůzku
+- Na co se zeptat
+- Co si připravit
+- Na co si dát pozor
+
+Email timeline:
+{email_text[:16000]}
+"""
+
+    model = "gpt-4o-mini"
+
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "Jsi praktický firemní AI asistent pro klientský kontext, "
+                    "meeting preparation a account management. Umíš číst obousměrnou "
+                    "emailovou timeline a určit, kdo je na tahu."
+                ),
+            },
+            {
+                "role": "user",
+                "content": prompt,
+            },
+        ],
+        temperature=0.2,
+    )
+
+    _track_openai_usage(
+        response=response,
+        user_id=user_id,
+        organization_id=organization_id,
+        feature="client_context_briefing",
+        model=model,
+    )
+
+    return response.choices[0].message.content or ""
