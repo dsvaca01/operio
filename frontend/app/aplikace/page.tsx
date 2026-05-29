@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import NeuralNetworkBackground from "@/components/NeuralNetworkBackground";
+import { config } from "@/app/config";
 
 type AssistantType = "knowledge" | "email" | "followup" | "client";
 
@@ -137,7 +138,7 @@ export default function Home() {
 
   const [selectedDueDate, setSelectedDueDate] = useState("");
 
-  const API_URL = "http://localhost:8000";
+  const API_URL = config.apiUrl;
 
   const loadDocuments = async () => {
     try {

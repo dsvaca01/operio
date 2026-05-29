@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { config } from "@/app/config";
 import {
   BarChart,
   Bar,
@@ -28,7 +29,7 @@ type CurrentUser = {
 };
 
 export default function AdminPage() {
-  const API_URL = "http://localhost:8000";
+  const API_URL = config.apiUrl;
 
   const [members, setMembers] = useState<Member[]>([]);
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);

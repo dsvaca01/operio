@@ -1,9 +1,10 @@
 "use client";
 
 import { useState } from "react";
+import { config } from "@/app/config";
 
 export default function EmailConnectionsPage() {
-  const API_URL = "http://localhost:8000";
+  const API_URL = config.apiUrl;
 
   const [provider, setProvider] = useState("imap");
   const [emailAddress, setEmailAddress] = useState("");
