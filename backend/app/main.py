@@ -6,6 +6,7 @@ from pydantic import BaseModel
 
 import shutil
 import uuid
+import secrets
 
 from app.config import settings
 from app.services.auth_service import (
@@ -115,8 +116,8 @@ class RegisterRequest(BaseModel):
     email: str
     password: str
     full_name: str
-    organization_name: str
-    email_provider: str
+    organization_code: str
+    email_provider: str | None = None
     email_address: str | None = None
 
 
@@ -128,6 +129,14 @@ class LoginRequest(BaseModel):
 class UpdateRoleRequest(BaseModel):
     user_id: int
     role: str
+
+class UpdateAccessRequest(BaseModel):
+    user_id: int
+    app_access_enabled: bool
+
+class CreateOrganizationRequest(BaseModel):
+    name: str
+    registration_code: str | None = None
 
 
 class MarkEmailReadRequest(BaseModel):
@@ -705,7 +714,7 @@ def auth_register(request: RegisterRequest):
             email=request.email,
             password=request.password,
             full_name=request.full_name,
-            organization_name=request.organization_name,
+            organization_code=request.organization_code,
             email_provider=request.email_provider,
             email_address=request.email_address,
         )
@@ -733,7 +742,6 @@ def auth_login(request: LoginRequest):
 @app.get("/me")
 def me(current_user: dict = Depends(get_current_user)):
     return current_user
-
 
 # =========================
 # Admin / Superadmin
@@ -767,6 +775,66 @@ def admin_update_role(
     )
 
     return {"status": "updated"}
+
+@app.post("/admin/members/access")
+def admin_update_member_access(
+    request: UpdateAccessRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    if current_user["role"] not in ["owner", "admin"] and current_user.get("global_role") != "superadmin":
+        raise HTTPException(
+            status_code=403,
+            detail="Only admin, owner or superadmin can update access",
+        )
+
+    conn = get_db_connection()
+
+    try:
+        with conn:
+            with conn.cursor() as cursor:
+                if current_user.get("global_role") == "superadmin":
+                    cursor.execute(
+                        """
+                        UPDATE organization_members
+                        SET app_access_enabled = %s
+                        WHERE user_id = %s
+                        """,
+                        (
+                            request.app_access_enabled,
+                            request.user_id,
+                        ),
+                    )
+                else:
+                    cursor.execute(
+                        """
+                        UPDATE organization_members
+                        SET app_access_enabled = %s
+                        WHERE user_id = %s
+                        AND organization_id = %s
+                        """,
+                        (
+                            request.app_access_enabled,
+                            request.user_id,
+                            current_user["organization_id"],
+                        ),
+                    )
+
+                updated_rows = cursor.rowcount
+
+                if updated_rows == 0:
+                    raise HTTPException(
+                        status_code=404,
+                        detail="User membership not found",
+                    )
+
+        return {
+            "status": "updated",
+            "user_id": request.user_id,
+            "app_access_enabled": request.app_access_enabled,
+        }
+
+    finally:
+        conn.close()
 
 
 @app.get("/superadmin/users")
@@ -1018,3 +1086,66 @@ def done_followup(
     )
 
     return {"success": True}
+
+@app.post("/superadmin/organizations")
+def superadmin_create_organization(
+    request: CreateOrganizationRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    if current_user.get("global_role") != "superadmin":
+        raise HTTPException(
+            status_code=403,
+            detail="Only superadmin can create organizations",
+        )
+
+    organization_name = request.name.strip()
+
+    if not organization_name:
+        raise HTTPException(
+            status_code=400,
+            detail="Organization name is required",
+        )
+
+    registration_code = request.registration_code.strip() if request.registration_code else None
+
+    if not registration_code:
+        registration_code = "org_" + secrets.token_urlsafe(12)
+
+    conn = get_db_connection()
+
+    try:
+        with conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO organizations (
+                        name,
+                        registration_code,
+                        is_active
+                    )
+                    VALUES (%s, %s, TRUE)
+                    RETURNING id, name, registration_code, is_active
+                    """,
+                    (
+                        organization_name,
+                        registration_code,
+                    ),
+                )
+
+                organization = cursor.fetchone()
+
+        return {
+            "id": organization[0],
+            "name": organization[1],
+            "registration_code": organization[2],
+            "is_active": organization[3],
+        }
+
+    except Exception as error:
+        raise HTTPException(
+            status_code=400,
+            detail=str(error),
+        )
+
+    finally:
+        conn.close()

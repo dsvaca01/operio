@@ -226,6 +226,21 @@ def init_db():
             ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         """))
 
+        conn.execute(text("""
+            ALTER TABLE organizations
+            ADD COLUMN IF NOT EXISTS registration_code TEXT UNIQUE
+        """))
+
+        conn.execute(text("""
+            ALTER TABLE organizations
+            ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE
+        """))
+
+        conn.execute(text("""
+            ALTER TABLE organization_members
+            ADD COLUMN IF NOT EXISTS app_access_enabled BOOLEAN NOT NULL DEFAULT FALSE
+        """))
+
 
 def create_followup_item(
     organization_id: int,
@@ -697,7 +712,9 @@ def get_organization_members(organization_id: int):
                     u.id AS user_id,
                     u.email,
                     u.full_name,
-                    om.role
+                    u.global_role,
+                    om.role,
+                    om.app_access_enabled
                 FROM organization_members om
                 JOIN users u ON u.id = om.user_id
                 WHERE om.organization_id = :organization_id
@@ -707,7 +724,6 @@ def get_organization_members(organization_id: int):
         )
 
         return [dict(row._mapping) for row in result]
-
 
 def update_member_role(organization_id: int, user_id: int, role: str):
     with engine.begin() as conn:
@@ -772,25 +788,26 @@ def save_ai_usage(
 
 def get_all_users():
     with engine.begin() as conn:
-        result = conn.execute(
+        rows = conn.execute(
             text("""
                 SELECT
                     u.id AS user_id,
                     u.email,
                     u.full_name,
                     u.global_role,
+                    om.role,
+                    om.app_access_enabled,
+                    o.id AS organization_id,
                     o.name AS organization_name,
-                    om.role AS organization_role
+                    o.registration_code
                 FROM users u
-                LEFT JOIN organization_members om
-                    ON om.user_id = u.id
-                LEFT JOIN organizations o
-                    ON o.id = om.organization_id
-                ORDER BY u.id
-            """),
-        )
+                LEFT JOIN organization_members om ON om.user_id = u.id
+                LEFT JOIN organizations o ON o.id = om.organization_id
+                ORDER BY u.id DESC
+            """)
+        ).mappings().all()
 
-        return [dict(row._mapping) for row in result]
+    return [dict(row) for row in rows]
 
 
 def get_email_connection(user_id: int):

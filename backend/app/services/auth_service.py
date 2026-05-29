@@ -42,25 +42,47 @@ def create_access_token(data: dict) -> str:
         algorithm=settings.jwt_algorithm,
     )
 
-
 def register_user(
     email: str,
     password: str,
     full_name: str,
-    organization_name: str,
-    email_provider: str,
+    organization_code: str,
+    email_provider: str | None = None,
     email_address: str | None = None,
 ):
+    clean_email = email.lower().strip()
+    clean_organization_code = organization_code.strip()
+
+    if not clean_organization_code:
+        raise ValueError("Organization code is required")
+
     password_hash = hash_password(password)
 
     with engine.begin() as conn:
         existing_user = conn.execute(
-            text("SELECT id FROM users WHERE email = :email"),
-            {"email": email},
+            text("""
+                SELECT id
+                FROM users
+                WHERE email = :email
+            """),
+            {"email": clean_email},
         ).first()
 
         if existing_user:
             raise ValueError("User already exists")
+
+        organization = conn.execute(
+            text("""
+                SELECT id, name
+                FROM organizations
+                WHERE registration_code = :registration_code
+                AND is_active = TRUE
+            """),
+            {"registration_code": clean_organization_code},
+        ).first()
+
+        if not organization:
+            raise ValueError("Invalid organization code")
 
         user = conn.execute(
             text("""
@@ -69,71 +91,62 @@ def register_user(
                 RETURNING id, email, full_name
             """),
             {
-                "email": email,
+                "email": clean_email,
                 "password_hash": password_hash,
                 "full_name": full_name,
             },
         ).first()
 
-        organization = conn.execute(
-            text("""
-                INSERT INTO organizations (name)
-                VALUES (:name)
-                ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
-                RETURNING id, name
-            """),
-            {"name": organization_name},
-        ).first()
-
         conn.execute(
             text("""
-                INSERT INTO organization_members (user_id, organization_id, role)
-                VALUES (:user_id, :organization_id, 'owner')
-            """),
-            {
-                "user_id": user.id,
-                "organization_id": organization.id,
-            },
-        )
-
-        conn.execute(
-            text("""
-                INSERT INTO email_connections (
+                INSERT INTO organization_members (
                     user_id,
                     organization_id,
-                    provider,
-                    email_address,
-                    status
+                    role,
+                    app_access_enabled
                 )
                 VALUES (
                     :user_id,
                     :organization_id,
-                    :provider,
-                    :email_address,
-                    'pending'
+                    'member',
+                    FALSE
                 )
             """),
             {
                 "user_id": user.id,
                 "organization_id": organization.id,
-                "provider": email_provider,
-                "email_address": email_address or email,
             },
         )
 
-    token = create_access_token(
-        {
-            "sub": str(user.id),
-            "email": user.email,
-            "organization_id": organization.id,
-            "role": "owner",
-            "global_role": "user",
-        }
-    )
+        if email_provider:
+            conn.execute(
+                text("""
+                    INSERT INTO email_connections (
+                        user_id,
+                        organization_id,
+                        provider,
+                        email_address,
+                        status
+                    )
+                    VALUES (
+                        :user_id,
+                        :organization_id,
+                        :provider,
+                        :email_address,
+                        'pending'
+                    )
+                """),
+                {
+                    "user_id": user.id,
+                    "organization_id": organization.id,
+                    "provider": email_provider,
+                    "email_address": email_address or clean_email,
+                },
+            )
 
     return {
-        "access_token": token,
-        "token_type": "bearer",
+        "status": "registered",
+        "message": "Registration created. Waiting for admin approval.",
         "user": {
             "id": user.id,
             "email": user.email,
@@ -145,8 +158,9 @@ def register_user(
         },
     }
 
-
 def login_user(email: str, password: str):
+    clean_email = email.lower().strip()
+
     with engine.begin() as conn:
         user = conn.execute(
             text("""
@@ -154,7 +168,7 @@ def login_user(email: str, password: str):
                 FROM users
                 WHERE email = :email
             """),
-            {"email": email},
+            {"email": clean_email},
         ).first()
 
         if not user:
@@ -165,9 +179,14 @@ def login_user(email: str, password: str):
 
         membership = conn.execute(
             text("""
-                SELECT organization_id, role
-                FROM organization_members
-                WHERE user_id = :user_id
+                SELECT
+                    om.organization_id,
+                    om.role,
+                    om.app_access_enabled,
+                    o.is_active AS organization_is_active
+                FROM organization_members om
+                JOIN organizations o ON o.id = om.organization_id
+                WHERE om.user_id = :user_id
                 LIMIT 1
             """),
             {"user_id": user.id},
@@ -175,6 +194,12 @@ def login_user(email: str, password: str):
 
         if not membership:
             raise ValueError("User has no organization membership")
+
+        if not membership.organization_is_active:
+            raise ValueError("Organization is disabled")
+
+        if not membership.app_access_enabled:
+            raise ValueError("User access is waiting for admin approval")
 
     token = create_access_token(
         {
@@ -197,7 +222,6 @@ def login_user(email: str, password: str):
         "organization_id": membership.organization_id,
         "role": membership.role,
     }
-
 
 def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),

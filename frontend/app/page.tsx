@@ -95,7 +95,7 @@ export default function Page() {
   const [authEmail, setAuthEmail] = useState("");
   const [authPassword, setAuthPassword] = useState("");
   const [authFullName, setAuthFullName] = useState("");
-  const [authOrganizationName, setAuthOrganizationName] = useState("");
+  const [authOrganizationCode, setAuthOrganizationCode] = useState("");
   const [authLoading, setAuthLoading] = useState(false);
 
   useEffect(() => {
@@ -114,21 +114,36 @@ export default function Page() {
   }, []);
 
   const handleAuth = async () => {
+    const cleanEmail = authEmail.trim();
+    const cleanPassword = authPassword;
+    const cleanFullName = authFullName.trim();
+    const cleanOrganizationCode = authOrganizationCode.trim();
+
+    if (!cleanEmail || !cleanPassword) {
+      alert("Zadej email a heslo.");
+      return;
+    }
+
+    if (authMode === "register" && (!cleanFullName || !cleanOrganizationCode)) {
+      alert("Zadej jméno a registrační kód organizace.");
+      return;
+    }
+
     const endpoint = authMode === "login" ? "/auth/login" : "/auth/register";
 
     const body =
       authMode === "login"
         ? {
-            email: authEmail,
-            password: authPassword,
+            email: cleanEmail,
+            password: cleanPassword,
           }
         : {
-            email: authEmail,
-            password: authPassword,
-            full_name: authFullName,
-            organization_name: authOrganizationName,
+            email: cleanEmail,
+            password: cleanPassword,
+            full_name: cleanFullName,
+            organization_code: cleanOrganizationCode,
             email_provider: "imap",
-            email_address: authEmail,
+            email_address: cleanEmail,
           };
 
     try {
@@ -145,7 +160,16 @@ export default function Page() {
       const data = await response.json();
 
       if (!response.ok) {
-        alert(data.detail || "Přihlášení selhalo.");
+        alert(data.detail || "Přihlášení / registrace selhala.");
+        return;
+      }
+
+      if (authMode === "register") {
+        alert("Registrace proběhla. Účet musí schválit administrátor organizace.");
+        setAuthMode("login");
+        setAuthPassword("");
+        setAuthFullName("");
+        setAuthOrganizationCode("");
         return;
       }
 
@@ -528,9 +552,9 @@ export default function Page() {
                           className="w-full rounded-2xl border border-slate-800 bg-slate-950 p-4 text-sm text-white outline-none placeholder:text-slate-600 focus:border-emerald-500"
                         />
                         <input
-                          value={authOrganizationName}
-                          onChange={(e) => setAuthOrganizationName(e.target.value)}
-                          placeholder="Název firmy"
+                          value={authOrganizationCode}
+                          onChange={(e) => setAuthOrganizationCode(e.target.value)}
+                          placeholder="Registrační kód organizace"
                           className="w-full rounded-2xl border border-slate-800 bg-slate-950 p-4 text-sm text-white outline-none placeholder:text-slate-600 focus:border-emerald-500"
                         />
                       </>
@@ -539,7 +563,13 @@ export default function Page() {
 
                   <button
                     onClick={handleAuth}
-                    disabled={authLoading || !authEmail || !authPassword}
+                    disabled={
+                      authLoading ||
+                      !authEmail.trim() ||
+                      !authPassword ||
+                      (authMode === "register" &&
+                        (!authFullName.trim() || !authOrganizationCode.trim()))
+                    }
                     className="mt-6 w-full rounded-2xl bg-emerald-500 px-6 py-3 font-semibold text-white hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     {authLoading ? "Zpracovávám..." : authMode === "login" ? "Přihlásit" : "Vytvořit účet"}
